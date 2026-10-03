@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="My Wiki 本地知识库工作台">
+  <meta name="api-base" content="/api/v1">
+  <title>My Wiki · 知识工作台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='8' fill='%23161714'/%3E%3Cpath d='M13 17h9l10 25 10-25h9L36 50h-8z' fill='%23f2efe7'/%3E%3Ccircle cx='49' cy='15' r='6' fill='%23d54b35'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css?v=4">
+</head>
+<body>
+  <div class="grain"></div>
+  <header class="masthead">
+    <a class="brand" href="/">MY<span>WIKI</span></a>
+    <div class="status"><i id="healthDot"></i><span id="healthText">正在连接</span></div>
+    <a class="docs-link" href="/docs" target="_blank" rel="noreferrer">API 文档 ↗</a>
+  </header>
+
+  <main>
+    <section class="workspace">
+      <aside class="library panel">
+        <div class="panel-head"><div><small>COLLECTIONS</small><h2>知识库</h2></div><button class="icon-btn" id="newKbBtn" title="新建知识库">＋</button></div>
+        <div id="kbList" class="kb-list"><p class="muted">加载中…</p></div>
+        <button class="text-btn danger-link" id="clearKbBtn" disabled>清空当前知识库资料</button>
+      </aside>
+
+      <section class="workbench">
+        <header class="context-head">
+          <div><small>ACTIVE COLLECTION</small><h1 id="workspaceTitle">选择一个知识库</h1></div>
+          <nav class="view-tabs" aria-label="知识库视图">
+            <button class="active" data-view="documents">资料</button>
+            <button data-view="wiki">Wiki</button>
+            <button data-view="ask">问答</button>
+          </nav>
+        </header>
+      <section class="documents panel view-panel active" data-view-panel="documents">
+        <div class="panel-head">
+          <div><small>ARCHIVE</small><h2 id="activeKbName">选择一个知识库</h2></div>
+          <div class="panel-actions">
+            <button class="button dark" id="addDocumentBtn" disabled>＋ 添加资料</button>
+          </div>
+        </div>
+        <div id="documentList" class="document-list empty-state">
+          <span class="empty-mark">⌁</span><p>选择或创建知识库后开始整理资料</p>
+        </div>
+      </section>
+
+      <section class="wiki-workspace view-panel" data-view-panel="wiki">
+        <section id="wikiPipeline" class="wiki-pipeline" aria-live="polite">
+          <div class="pipeline-empty"><span>PROCESS MAP</span><p>添加资料后，这里会显示 Wiki 构建全过程。</p></div>
+        </section>
+        <aside class="wiki-index">
+          <div class="wiki-mode-switch" aria-label="Wiki 展示模式">
+            <button class="active" data-wiki-mode="reader">目录阅读</button>
+            <button data-wiki-mode="graph">关系图谱</button>
+          </div>
+          <div class="wiki-tools"><input id="wikiSearch" type="search" placeholder="搜索页面…"><button id="newWikiPageBtn" title="新建页面">＋</button></div>
+          <div id="wikiPageList" class="wiki-directory"><p class="muted">选择知识库后浏览 Wiki</p></div>
+        </aside>
+        <article id="wikiArticle" class="wiki-article empty-state"><div><span class="empty-mark">§</span><p>选择左侧页面开始阅读</p></div></article>
+        <aside id="wikiEvidence" class="wiki-evidence"><small>SOURCES</small><h3>证据与链接</h3><p class="muted">页面来源会显示在这里。</p></aside>
+        <section id="wikiGraph" class="wiki-graph" hidden>
+          <header class="graph-head">
+            <div><small>KNOWLEDGE CONSTELLATION</small><h2>知识关系图谱</h2><p id="graphSummary">正在整理页面关系…</p></div>
+            <div class="graph-actions"><button id="graphResetBtn" class="text-btn">重新居中</button></div>
+          </header>
+          <div id="graphCanvas" class="graph-canvas" aria-live="polite"></div>
+          <footer class="graph-legend"><span><i data-tone="entity"></i>实体</span><span><i data-tone="concept"></i>概念</span><span><i data-tone="topic"></i>主题</span><span><i data-tone="document"></i>文档</span><em>拖动节点 · 滚轮缩放 · 点击阅读</em></footer>
+        </section>
+      </section>
+      <section class="ask panel view-panel" data-view-panel="ask">
+        <div class="panel-head"><div><small>RESEARCH DESK</small><h2>问答台</h2></div><button class="text-btn" id="clearChatBtn">清空</button></div>
+        <div id="chatLog" class="chat-log">
+          <article class="message assistant"><span class="avatar">W</span><div><p>你好。选择知识库后，可以问我资料里的任何问题。</p></div></article>
+        </div>
+        <form id="chatForm" class="composer">
+          <textarea id="question" rows="2" maxlength="4000" placeholder="从资料中寻找答案…" disabled></textarea>
+          <button aria-label="发送问题" disabled>↑</button>
+        </form>
+      </section>
+      </section>
+    </section>
+  </main>
+
+  <dialog id="kbDialog">
+    <form method="dialog" id="kbForm" class="dialog-form">
+      <button type="button" class="close" data-close-dialog aria-label="关闭">×</button><small>NEW COLLECTION</small><h2>建立知识库</h2>
+      <label>名称<input name="name" maxlength="100" required placeholder="例如：产品手册"></label>
+      <label>描述<textarea name="description" maxlength="500" rows="3" placeholder="这个知识库收录什么？"></textarea></label>
+      <button class="button accent" value="default">创建知识库</button>
+    </form>
+  </dialog>
+
+  <dialog id="documentDialog">
+    <form method="dialog" id="documentForm" class="dialog-form wide">
+      <button type="button" class="close" data-close-dialog aria-label="关闭">×</button><small>ADD MATERIAL</small><h2>添加资料</h2>
+      <div class="tabs"><button type="button" class="tab active" data-tab="file">上传文件</button><button type="button" class="tab" data-tab="manual">手工录入</button></div>
+      <div id="fileTab" class="tab-content active"><label class="drop-zone">选择文档<input name="file" type="file" accept=".txt,.md,.markdown,.html,.htm,.mhtml,.pdf,.docx,.xlsx,.csv,.pptx,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff"><span>TXT · MD · HTML · PDF · DOCX · XLSX · CSV · PPTX · 图片</span></label></div>
+      <div id="manualTab" class="tab-content"><label>标题<input name="title" maxlength="200" placeholder="资料标题"></label><label>正文<textarea name="content" rows="9" placeholder="支持 Markdown"></textarea></label></div>
+      <button class="button accent" value="default">开始处理</button>
+    </form>
+  </dialog>
+  <dialog id="viewerDialog" class="viewer-dialog">
+    <section class="viewer-shell">
+      <button type="button" class="close" data-close-dialog aria-label="关闭">×</button>
+      <small id="viewerEyebrow">DOCUMENT VIEW</small>
+      <h2 id="viewerTitle">资料详情</h2>
+      <div id="viewerBody" class="viewer-body"><p class="muted">正在加载…</p></div>
+    </section>
+  </dialog>
+  <dialog id="wikiEditorDialog">
+    <form method="dialog" id="wikiEditorForm" class="dialog-form wide">
+      <button type="button" class="close" data-close-dialog aria-label="关闭">×</button>
+      <small>WIKI EDITOR</small><h2 id="wikiEditorTitle">新建页面</h2>
+      <input type="hidden" name="page_id">
+      <label>标题<input name="title" maxlength="200" required></label>
+      <label>Slug<input name="slug" pattern="[a-z0-9][a-z0-9/_-]*" required placeholder="concept/example"></label>
+      <label>摘要<textarea name="summary" rows="2" maxlength="1000"></textarea></label>
+      <label>正文<textarea name="content" rows="12" required placeholder="支持 Markdown 和 [[slug|Wiki 链接]]"></textarea></label>
+      <button class="button accent">保存页面</button>
+    </form>
+  </dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js?v=5" defer></script>
+</body>
+</html>
