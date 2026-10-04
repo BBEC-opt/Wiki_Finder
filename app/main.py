@@ -13,6 +13,7 @@ from app.core.config import get_settings
 from app.core.errors import AppError
 from app.infrastructure.database import create_database
 from app.infrastructure.providers import create_providers
+from app.infrastructure.tracing import Tracing
 from app.infrastructure.repository import Repository
 from app.infrastructure.storage import create_storage
 from app.infrastructure.vector_index import create_vector_index
@@ -37,12 +38,16 @@ async def lifespan(app: FastAPI):
     storage = create_storage(settings)
     await storage.initialize()
     parser = ParsingService(settings.artifact_dir, settings.ocr_engine)
+    tracing = Tracing.from_settings(settings)
     embedding, chat = create_providers(settings)
+    embedding.tracing = chat.tracing = tracing
     queue = await create_task_queue(settings)
     ingestion = IngestionService(repo, storage, queue, settings)
     worker = IngestionWorker(repo, parser, embedding, queue, settings, storage=storage, chat_provider=chat)
     retrieval = RetrievalService(repo, embedding, vector_index)
     rag = RagService(repo, retrieval, chat, settings.max_context_chars)
+    worker.tracing = tracing
+    retrieval.tracing = rag.tracing = tracing
     outbox = OutboxDispatcher(repo, vector_index)
     for key, value in locals().copy().items():
         if key in {"settings", "repo", "storage", "parser", "ingestion", "worker", "retrieval", "rag", "outbox"}:
@@ -61,6 +66,7 @@ async def lifespan(app: FastAPI):
         await storage.close()
         await queue.close()
         await database.close()
+        await tracing.close()
 
 
 def create_app(settings_override=None) -> FastAPI:

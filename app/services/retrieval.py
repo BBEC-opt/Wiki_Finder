@@ -5,6 +5,7 @@ from collections import defaultdict
 
 import jieba
 
+from app.infrastructure.tracing import current_observation, traced
 from app.core.errors import AppError
 
 
@@ -38,8 +39,12 @@ class RetrievalService:
         self.embedding = embedding_provider
         self.vector_index = vector_index
 
+    @traced("hybrid-search", "retriever")
     async def search(self, query: str, kb_ids: list[str], knowledge_ids: list[str] | None,
                      top_k: int, candidate_k: int = 20, threshold: float = 0.0) -> list[dict]:
+        observation = current_observation()
+        observation.update(input={"query_chars": len(query), "top_k": top_k, "candidate_k": candidate_k})
+        observation.content(input=query)
         query_vector = (await self.embedding.embed([query]))[0]
         dense = []
         if self.vector_index is None:
@@ -79,6 +84,8 @@ class RetrievalService:
                 break
         for index, item in enumerate(result, 1):
             item["index"] = index
+        observation.update(output={"chunk_ids": [item["chunk_id"] for item in result], "count": len(result)})
+        observation.content(output=result)
         return result
 
     @staticmethod

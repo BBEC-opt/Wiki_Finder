@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
+from app.infrastructure.tracing import current_observation, traced
 from app.services.chunker import build_parent_chunks, split_document
 from app.domain import ChunkDraft
 from app.core.errors import AppError, ParseError
@@ -135,6 +136,7 @@ class IngestionWorker:
             finally:
                 await self.queue.task_done()
 
+    @traced("document-ingestion")
     async def process(self, task_id: str) -> None:
         task = await self.repo.claim_task(task_id)
         if not task:
@@ -142,6 +144,7 @@ class IngestionWorker:
         knowledge = await self.repo.get_knowledge(task["knowledge_id"])
         if not knowledge:
             return
+        current_observation().update(input={"task_id": task_id, "knowledge_id": knowledge["id"], "attempt": task["attempts"]})
         await self.repo.mark_processing(knowledge["id"])
         current_stage = None
         try:
@@ -231,7 +234,9 @@ class IngestionWorker:
             await self.repo.finish_stage(current_stage, {"pages": len(wiki_pages), **wiki_meta})
             await self.repo.mark_completed(knowledge["id"])
             await self.repo.task_succeeded(task_id)
+            current_observation().update(output={"status": "succeeded", "chunks": len(drafts), "pages": len(wiki_pages)})
         except Exception as exc:
+            current_observation().error(exc)
             code = getattr(exc, "code", "processing_failed")
             if current_stage:
                 await self.repo.finish_stage(current_stage, error=(code, str(exc)))

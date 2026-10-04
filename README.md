@@ -110,6 +110,33 @@ EMBEDDING_BATCH_SIZE=20
 
 默认示例使用阿里云百炼北京地域的 OpenAI-compatible 接口；其他兼容服务也可以指向对应网关。切换 Embedding 模型或维度后，应新建知识库或重处理全部知识。
 
+## Langfuse 追踪（可选）
+
+安装接入依赖（Python SDK 4.16.0）：
+
+```powershell
+python -m pip install -e ".[langfuse]"
+```
+
+在本地 `.env` 配置 Langfuse 项目地址和 API Keys，然后重启 Web 服务及独立 Worker：
+
+```env
+LANGFUSE_ENABLED=true
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+LANGFUSE_PUBLIC_KEY=pk-lf-你的公钥
+LANGFUSE_SECRET_KEY=sk-lf-你的密钥
+LANGFUSE_TRACING_ENVIRONMENT=development
+LANGFUSE_CAPTURE_CONTENT=false
+```
+
+地址应与项目地域或自建服务一致；密钥在 Langfuse 项目的 Settings → API Keys 创建，不提交到 Git。关闭时无需 SDK、密钥或网络，保持默认离线能力。
+
+上传一份示例资料，再发起检索和问答，可以在 Langfuse 查看 `document-ingestion`、`hybrid-search`、`rag-answer`；Wiki 子步骤和模型调用嵌套在对应流程下，会话通过 `session_id` 聚合。独立 Worker 的每次处理尝试各自生成追踪，通过 task_id 和 knowledge_id 关联。
+
+默认采集 ID、数量、模型名、耗时、错误类型及模型返回的 Token 用量，不发送文档、提示词和回答正文。确需排查内容时设置 `LANGFUSE_CAPTURE_CONTENT=true`，此时问答、模型消息和检索正文会传至所配服务。离线模型及未返回 usage 的兼容模型不估算 Token 或费用。启用追踪时流式模型需支持 `stream_options.include_usage`。
+
+追踪故障不改变业务结果；进程正常退出时等待 SDK 导出。该接入不改 API/SSE、数据库或向量维度，无需数据迁移或重新入库。参考 [Langfuse SDK 文档](https://langfuse.com/docs/observability/sdk/instrumentation)。
+
 ## 文档解析
 
 `POST /api/v1/parser/preview` 可以在不入库的情况下查看完整解析结果。

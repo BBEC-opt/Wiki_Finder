@@ -2,8 +2,9 @@
 
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -45,6 +46,13 @@ class Settings(BaseSettings):
     embedding_dimension: int = Field(256, ge=8)
     model_timeout_seconds: int = Field(60, ge=1)
 
+    langfuse_enabled: bool = False
+    langfuse_public_key: str = ""
+    langfuse_secret_key: SecretStr = SecretStr("")
+    langfuse_base_url: str = ""
+    langfuse_tracing_environment: str = "development"
+    langfuse_capture_content: bool = False
+
     chunk_size: int = Field(800, ge=100)
     chunk_overlap: int = Field(100, ge=0)
     parent_chunk_size: int = Field(3_200, ge=200)
@@ -80,6 +88,12 @@ class Settings(BaseSettings):
             raise ValueError("RUN_EMBEDDED_WORKER=false requires TASK_NOTIFIER_DRIVER=redis")
         if self.object_storage_driver == "minio" and not (self.minio_access_key and self.minio_secret_key):
             raise ValueError("MINIO_ACCESS_KEY and MINIO_SECRET_KEY are required for MinIO")
+        if self.langfuse_enabled:
+            if not (self.langfuse_public_key.strip() and self.langfuse_secret_key.get_secret_value().strip()):
+                raise ValueError("启用 Langfuse 必须配置 LANGFUSE_PUBLIC_KEY 和 LANGFUSE_SECRET_KEY")
+            endpoint = urlsplit(self.langfuse_base_url)
+            if endpoint.scheme not in {"http", "https"} or not endpoint.hostname or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment:
+                raise ValueError("LANGFUSE_BASE_URL 必须是无凭据、查询参数或片段的 HTTP(S) 地址")
         return self
 
     @property

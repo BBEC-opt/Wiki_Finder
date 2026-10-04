@@ -6,6 +6,7 @@ import unicodedata
 from pathlib import Path
 from uuid import uuid4
 
+from app.infrastructure.tracing import current_observation, traced
 from app.domain import ChunkDraft, ParsedDocument
 
 
@@ -41,10 +42,12 @@ class WikiGenerationService:
         self.extraction_granularity = extraction_granularity
         self.max_candidates = max_candidates
 
+    @traced("wiki-generation")
     async def generate(
         self, knowledge: dict, parsed: ParsedDocument, chunks: list[ChunkDraft], existing_pages: list[dict] | None = None,
         repo=None, build_id: str | None = None,
     ) -> tuple[list[dict], dict]:
+        current_observation().update(input={"knowledge_id": knowledge["id"], "chunks": len(chunks)})
         existing_pages = existing_pages or []
         await self._stage_start(repo, build_id, "candidate_extraction", {"chunks": len(chunks)})
         candidates, used_model = await self._candidates(knowledge, chunks, existing_pages)
@@ -65,6 +68,7 @@ class WikiGenerationService:
             pages.append(page)
         pages.append(self._source_page(knowledge, parsed))
         await self._stage_finish(repo, build_id, "reduce", {"pages": len(pages)})
+        current_observation().update(output={"mode": "model" if used_model else "offline", "pages": len(pages), "candidates": len(candidates)})
         return pages, {
             "mode": "model" if used_model else "offline",
             "candidates": len(candidates),
@@ -83,6 +87,7 @@ class WikiGenerationService:
         if repo and build_id:
             await repo.finish_wiki_build_stage(build_id, stage, output)
 
+    @traced("wiki-deduplication")
     async def _deduplicate(self, candidates: list[dict], existing: list[dict]) -> list[dict]:
         eligible = [page for page in existing
                     if page["page_type"] in {"entity", "concept", "topic"} and page["status"] != "archived"]
@@ -105,7 +110,8 @@ class WikiGenerationService:
                     target = merges.get(item["slug"])
                     if target in canonical:
                         self._adopt_canonical(item, canonical[target])
-            except Exception:
+            except Exception as exc:
+                current_observation().update(level="WARNING", status_message=type(exc).__name__, metadata={"fallback": "deterministic"})
                 pass
         merged: dict[str, dict] = {}
         for item in candidates:
@@ -129,6 +135,7 @@ class WikiGenerationService:
         value = unicodedata.normalize("NFKC", cls._plain(value)).casefold()
         return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", value)
 
+    @traced("wiki-taxonomy")
     async def _taxonomy(self, candidates: list[dict], existing: list[dict]) -> dict[str, str]:
         entries = {page["slug"]: {"slug": page["slug"], "title": page["title"], "type": page["page_type"]}
                    for page in existing if page["page_type"] in {"entity", "concept", "topic"}}
@@ -151,12 +158,14 @@ class WikiGenerationService:
                 path = str(folders.get(slug, assignments[slug])).strip(" / ")
                 if path and len(path.split("/")) <= 2:
                     assignments[slug] = path[:100]
-        except Exception:
+        except Exception as exc:
+            current_observation().update(level="WARNING", status_message=type(exc).__name__, metadata={"fallback": "deterministic"})
             pass
         for item in candidates:
             item["folder"] = assignments[item["slug"]]
         return assignments
 
+    @traced("wiki-candidates")
     async def _candidates(self, knowledge: dict, chunks: list[ChunkDraft], existing: list[dict]) -> tuple[list[dict], bool]:
         if self.provider_mode == "openai" and self.chat:
             known = [{"slug": p["slug"], "title": p["title"], "type": p["page_type"]}
@@ -168,7 +177,8 @@ class WikiGenerationService:
                     prompt = f"<granularity>{self.extraction_granularity}</granularity>\n<existing>{json.dumps(known, ensure_ascii=False)}</existing>\n<chunks>{json.dumps(compact, ensure_ascii=False)}</chunks>"
                     raw = await self.chat.complete([{"role": "system", "content": CANDIDATE_SYSTEM}, {"role": "user", "content": prompt}])
                     collected.extend(self._json(raw).get("candidates", []))
-                except Exception:
+                except Exception as exc:
+                    current_observation().update(level="WARNING", status_message=type(exc).__name__, metadata={"fallback": "deterministic"})
                     # 单批失败不丢弃其他批次已经得到的有效候选。
                     continue
             candidates = self._rank_candidate_skeletons(collected, self._candidate_limit())
@@ -201,6 +211,7 @@ class WikiGenerationService:
         ranked = sorted(grouped.values(), key=lambda entry: (-entry["mentions"], entry["position"]))
         return [entry["item"] for entry in ranked[:max_candidates]]
 
+    @traced("wiki-citations")
     async def _map_citations(self, candidates: list[dict], chunks: list[ChunkDraft]) -> list[dict]:
         if not candidates:
             return []
@@ -216,7 +227,8 @@ class WikiGenerationService:
                     valid = {c.chunk_index for c in batch}
                     for slug in citations:
                         citations[slug].update(int(i) for i in mapping.get(slug, []) if str(i).isdigit() and int(i) in valid)
-            except Exception:
+            except Exception as exc:
+                current_observation().update(level="WARNING", status_message=type(exc).__name__, metadata={"fallback": "deterministic"})
                 citations = {candidate["slug"]: set() for candidate in candidates}
         for candidate in candidates:
             if not citations[candidate["slug"]]:
@@ -233,6 +245,7 @@ class WikiGenerationService:
                 result.append(candidate)
         return result
 
+    @traced("wiki-page")
     async def _candidate_page(self, knowledge: dict, candidate: dict, chunks: list[ChunkDraft], existing: list[dict]) -> dict:
         chunk_map = {chunk.chunk_index: chunk for chunk in chunks}
         evidence = [chunk_map[i] for i in candidate["chunk_indices"] if i in chunk_map]
@@ -263,7 +276,8 @@ class WikiGenerationService:
                 if str(result.get("content", "")).strip():
                     summary = str(result.get("summary") or summary)[:1000]
                     content = str(result["content"]).strip()
-            except Exception:
+            except Exception as exc:
+                current_observation().update(level="WARNING", status_message=type(exc).__name__, metadata={"fallback": "deterministic"})
                 pass
         page = self._page(candidate["slug"], candidate["title"], summary, content, candidate["page_type"],
                           candidate["chunk_indices"], knowledge, candidate.get("folder", "主题"),

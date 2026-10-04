@@ -3,7 +3,10 @@
 import asyncio
 import json
 import time
+from contextlib import aclosing
 from uuid import uuid4
+
+from app.infrastructure.tracing import current_observation, traced
 
 
 SYSTEM_PROMPT = """你是一个严谨的知识库问答助手。
@@ -20,7 +23,11 @@ class RagService:
         self.repo, self.retrieval, self.chat = repo, retrieval, chat_provider
         self.max_context_chars = max_context_chars
 
+    @traced("rag-answer", session=True)
     async def stream(self, request):
+        observation = current_observation()
+        observation.update(input={"query_chars": len(request.query)}, metadata={"knowledge_base_ids": request.knowledge_base_ids})
+        observation.content(input=request.query)
         request_id, started = str(uuid4()), time.perf_counter()
         try:
             await self.repo.save_message(request.session_id, "user", request.query)
@@ -49,11 +56,14 @@ class RagService:
             prompt = f"<references>\n{''.join(context)}\n</references>\n\n用户问题：{request.query}"
             messages.append({"role": "user", "content": prompt})
             answer_parts = []
-            async for delta in self.chat.stream(messages):
-                answer_parts.append(delta)
-                yield sse("answer", {"request_id": request_id, "delta": delta})
+            async with aclosing(self.chat.stream(messages)) as stream:
+                async for delta in stream:
+                    answer_parts.append(delta)
+                    yield sse("answer", {"request_id": request_id, "delta": delta})
             answer = "".join(answer_parts)
             message_id = await self.repo.save_message(request.session_id, "assistant", answer, references)
+            observation.update(output={"answer_chars": len(answer), "reference_count": len(references)})
+            observation.content(output=answer)
             yield sse("done", {
                 "request_id": request_id, "session_id": request.session_id, "message_id": message_id,
                 "reference_count": len(references), "elapsed_ms": round((time.perf_counter() - started) * 1000),
@@ -61,6 +71,7 @@ class RagService:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            observation.error(exc)
             yield sse("error", {"request_id": request_id, "code": "model_failed", "message": str(exc)})
 
     @staticmethod

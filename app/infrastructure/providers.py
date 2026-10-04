@@ -6,9 +6,11 @@ import math
 import re
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 
 import httpx
 
+from app.infrastructure.tracing import current_observation, traced
 from app.core.errors import AppError
 
 
@@ -23,8 +25,9 @@ class ChatProvider(ABC):
 
     async def complete(self, messages: list[dict]) -> str:
         parts = []
-        async for delta in self.stream(messages):
-            parts.append(delta)
+        async with aclosing(self.stream(messages)) as stream:
+            async for delta in stream:
+                parts.append(delta)
         return "".join(parts)
 
 
@@ -32,7 +35,9 @@ class HashEmbeddingProvider(EmbeddingProvider):
     def __init__(self, dimension: int):
         self.dimension = dimension
 
+    @traced("offline-embedding", "embedding")
     async def embed(self, texts: list[str]) -> list[list[float]]:
+        current_observation().update(model="hash-embedding", input={"text_count": len(texts)}, output={"dimension": self.dimension})
         return [self._one(text) for text in texts]
 
     def _one(self, text: str) -> list[float]:
@@ -47,7 +52,11 @@ class HashEmbeddingProvider(EmbeddingProvider):
 
 
 class ExtractiveChatProvider(ChatProvider):
+    @traced("offline-answer", "generation")
     async def stream(self, messages: list[dict]) -> AsyncIterator[str]:
+        observation = current_observation()
+        observation.update(model="extractive-offline", input={"message_count": len(messages)})
+        observation.content(input=messages)
         prompt = messages[-1]["content"]
         refs = re.findall(r'<reference id="(\d+)"[^>]*>\s*([\s\S]*?)</reference>', prompt)
         if not refs:
@@ -58,6 +67,8 @@ class ExtractiveChatProvider(ChatProvider):
                 clean = re.sub(r"\s+", " ", text).strip()
                 snippets.append(f"{clean[:260]} [{idx}]")
             answer = "根据知识库资料：\n\n" + "\n\n".join(snippets)
+        observation.update(output={"answer_chars": len(answer)})
+        observation.content(output=answer)
         for i in range(0, len(answer), 24):
             yield answer[i:i + 24]
 
@@ -70,7 +81,11 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         # 百炼 text-embedding-v4 的同步接口单次最多接收 10 条文本。
         self.max_batch_size = 10 if model == "text-embedding-v4" else None
 
+    @traced("model-embedding", "embedding")
     async def embed(self, texts: list[str]) -> list[list[float]]:
+        observation = current_observation()
+        observation.update(model=self.model, input={"text_count": len(texts), "characters": sum(map(len, texts))})
+        observation.content(input=texts)
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             payload = {"model": self.model, "input": texts}
             if self.model.startswith("text-embedding-3-") or self.model in {
@@ -84,10 +99,13 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
                 error = AppError("embedding_provider_error", f"Embedding 服务返回 {response.status_code}：{detail}", 502)
                 error.retryable = response.status_code == 429 or response.status_code >= 500
                 raise error
-            data = sorted(response.json()["data"], key=lambda x: x["index"])
+            body = response.json()
+            observation.update(usage_details=_usage_details(body.get("usage")))
+            data = sorted(body["data"], key=lambda x: x["index"])
         vectors = [normalize_vector(item["embedding"]) for item in data]
         if len(vectors) != len(texts):
             raise ValueError("Embedding response count mismatch")
+        observation.update(output={"vector_count": len(vectors), "dimension": len(vectors[0]) if vectors else 0})
         return vectors
 
 
@@ -97,18 +115,42 @@ class OpenAIChatProvider(ChatProvider):
         self.headers = {"Authorization": f"Bearer {api_key}"}
         self.model, self.timeout = model, timeout
 
+    @traced("model-chat", "generation")
     async def stream(self, messages: list[dict]) -> AsyncIterator[str]:
+        observation = current_observation()
+        observation.update(model=self.model, input={"message_count": len(messages)})
+        observation.content(input=messages)
+        request_body = {"model": self.model, "messages": messages, "stream": True}
+        if observation.tracing.client is not None:
+            request_body["stream_options"] = {"include_usage": True}
+        parts, answer_chars = [], 0
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             async with client.stream("POST", self.url, headers=self.headers,
-                                     json={"model": self.model, "messages": messages, "stream": True}) as response:
+                                     json=request_body) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     if not line.startswith("data: ") or line == "data: [DONE]":
                         continue
                     payload = json.loads(line[6:])
-                    delta = payload.get("choices", [{}])[0].get("delta", {}).get("content")
+                    if payload.get("usage"):
+                        observation.update(usage_details=_usage_details(payload["usage"]))
+                    choices = payload.get("choices") or []
+                    delta = choices[0].get("delta", {}).get("content") if choices else None
                     if delta:
+                        answer_chars += len(delta)
+                        if observation.tracing.capture_content:
+                            parts.append(delta)
                         yield delta
+        observation.update(output={"answer_chars": answer_chars})
+        observation.content(output="".join(parts))
+
+
+def _usage_details(usage: dict | None) -> dict:
+    if not isinstance(usage, dict):
+        return {}
+    return {target: usage[source] for source, target in (
+        ("prompt_tokens", "input"), ("completion_tokens", "output"), ("total_tokens", "total"),
+    ) if isinstance(usage.get(source), int) and usage[source] >= 0}
 
 
 def normalize_vector(vector: list[float]) -> list[float]:

@@ -77,3 +77,13 @@ Wiki 与解析预览分离。`parsed.md` 是忠实保留页码、表格和图片
 - API、业务流程、基础设施按目录隔离，但不为每个类创建单独协议层。
 - Dense 检索采用 SQLite JSON 加进程内计算，适用于演示和小数据集；替换向量库时保持服务层调用边界稳定。
 - Wiki 生成是索引后的独立阶段；自动页面与人工页面共享知识库级命名空间，但采用不同覆盖策略。
+
+## Langfuse 可观测性
+
+- `app/infrastructure/tracing.py` 管理可选 SDK 4.16.0、内容策略、追踪生命周期与错误隔离；Web 与独立 Worker 分别创建客户端，退出时在线程中调用 shutdown，等待批量导出。
+- `LANGFUSE_ENABLED` 默认 false，不导入 SDK、不发网络请求；启用需安装 `.[langfuse]` 并配置 `LANGFUSE_BASE_URL/PUBLIC_KEY/SECRET_KEY`。地址必须显式指定，密钥用 SecretStr 保存。环境由 `LANGFUSE_TRACING_ENVIRONMENT` 指定，默认 development。
+- 追踪层级：`rag-answer → hybrid-search → embedding` 与 `rag-answer → generation`；`document-ingestion → embedding / wiki-generation → Wiki 子步骤 → generation`。直接检索自成根追踪。问答传播 session_id；摄取每次执行单独追踪并记录 task_id、knowledge_id 和尝试次数，不跨队列传播请求上下文。
+- 保留现有 httpx Provider，使用手动 observation 和 ContextVar 维护父子关系。每次推进异步生成器后恢复调用方上下文，避免 SSE 暂停期间串线；异常、取消与显式关闭均结束 observation。业务内部捕获的错误显式标记 ERROR。
+- 默认仅写入统计和标识符，异常仅记录类型；`LANGFUSE_CAPTURE_CONTENT=true` 才记录问答、模型消息及检索正文，开启后这些数据将发送到配置的 Langfuse。完整上传文件、认证头和配置对象不进入追踪。SDK 操作失败输出固定告警，不回显异常内容、不改变业务结果。
+- 真实模型记录模型名及服务端 usage；开启追踪时对流式聊天请求加 `stream_options.include_usage`，兼容服务需支持该参数，usage-only 空 choices 事件正常处理。无 usage 不伪造计数；离线模型标记为 hash-embedding / extractive-offline。
+- API/SSE 与持久化契约无变化，不需要迁移或重新生成向量。自动测试使用真实 SDK 的内存 exporter，不访问 Langfuse 或付费模型；远端凭据就绪后还需上传示例资料并发起问答，在 Langfuse 审核层级、会话和用量。
