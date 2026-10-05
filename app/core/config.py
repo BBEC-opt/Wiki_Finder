@@ -64,6 +64,19 @@ class Settings(BaseSettings):
     wiki_extraction_granularity: str = "standard"
     wiki_max_candidates: int = Field(12, ge=3, le=30)
 
+    rerank_enabled: bool = False
+    rerank_model: str = "BAAI/bge-reranker-v2-m3"
+    rerank_batch_size: int = Field(32, ge=1, le=256)
+    rerank_threshold: float = Field(0.3, ge=0.0, le=1.0)
+    rerank_top_n: int = Field(20, ge=1, le=100)
+
+    rrf_k: int = Field(60, ge=1, le=200)
+    vector_weight: float = Field(1.0, ge=0.0, le=10.0)
+    keyword_weight: float = Field(1.0, ge=0.0, le=10.0)
+    mmr_enabled: bool = True
+    mmr_lambda: float = Field(0.7, ge=0.0, le=1.0)
+    mmr_diversity_threshold: float = Field(0.85, ge=0.0, le=1.0)
+
     ocr_engine: str = "none"
 
     @model_validator(mode="after")

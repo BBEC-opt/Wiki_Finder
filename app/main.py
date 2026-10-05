@@ -18,6 +18,7 @@ from app.infrastructure.repository import Repository
 from app.infrastructure.storage import create_storage
 from app.infrastructure.vector_index import create_vector_index
 from app.infrastructure.task_queue import create_task_queue
+from app.infrastructure.rerank_provider import create_rerank_provider
 from app.parsing import ParsingService
 from app.services.ingestion import IngestionService, IngestionWorker
 from app.services.rag import RagService
@@ -41,10 +42,11 @@ async def lifespan(app: FastAPI):
     tracing = Tracing.from_settings(settings)
     embedding, chat = create_providers(settings)
     embedding.tracing = chat.tracing = tracing
+    rerank_provider = create_rerank_provider(settings)
     queue = await create_task_queue(settings)
     ingestion = IngestionService(repo, storage, queue, settings)
     worker = IngestionWorker(repo, parser, embedding, queue, settings, storage=storage, chat_provider=chat)
-    retrieval = RetrievalService(repo, embedding, vector_index)
+    retrieval = RetrievalService(repo, embedding, settings, rerank_provider, vector_index)
     rag = RagService(repo, retrieval, chat, settings.max_context_chars)
     worker.tracing = tracing
     retrieval.tracing = rag.tracing = tracing
