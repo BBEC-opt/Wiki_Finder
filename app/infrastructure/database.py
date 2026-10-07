@@ -54,6 +54,10 @@ CREATE TABLE IF NOT EXISTS processing_stages (
   stage TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT,
   input_summary TEXT, output_summary TEXT, error_code TEXT, error_message TEXT
 );
+CREATE TABLE IF NOT EXISTS chat_sessions (
+  id TEXT PRIMARY KEY, title TEXT NOT NULL, knowledge_base_id TEXT REFERENCES knowledge_bases(id) ON DELETE SET NULL,
+  knowledge_ids_json TEXT NOT NULL DEFAULT '[]', active_turn TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS chat_messages (
   id TEXT PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL,
   references_json TEXT, created_at TEXT NOT NULL
@@ -143,9 +147,20 @@ class Database:
             await self._migrate_legacy_wiki(db)
             await db.executescript(SCHEMA)
             await self._migrate_parent_chunks(db)
+            await self._migrate_chat(db)
             await db.commit()
         finally:
             await db.close()
+
+    @staticmethod
+    async def _migrate_chat(db: aiosqlite.Connection) -> None:
+        columns = {row[1] for row in await (await db.execute("PRAGMA table_info(chat_messages)")).fetchall()}
+        for name, definition in {"turn_id": "TEXT", "status": "TEXT NOT NULL DEFAULT 'completed'"}.items():
+            if name not in columns:
+                await db.execute(f"ALTER TABLE chat_messages ADD COLUMN {name} {definition}")
+        await db.execute("""INSERT INTO chat_sessions(id,title,created_at,updated_at)
+            SELECT session_id,'旧会话',MIN(created_at),MAX(created_at) FROM chat_messages GROUP BY session_id
+            ON CONFLICT(id) DO NOTHING""")
 
     async def close(self) -> None:
         """SQLite 每次操作使用短连接，无需关闭共享资源。"""

@@ -16,7 +16,8 @@
 - 中文分词、SQLite FTS5/BM25、Dense 检索和 RRF 融合
 - Reranker 模型重排序与 MMR 多样性算法（与 WeKnora 对齐）
 - 带引用的 Prompt、离线摘取式回答与 OpenAI-compatible 流式回答
-- SSE `references → answer → done/error`
+- SSE `start → references → answer → done/error`，支持停止、部分回答保存及失败重试
+- 按知识库隔离的多会话、限定资料、多轮追问、历史分页和引用快照预览
 - 独立 Wiki 生成阶段，提供概览、主题目录、来源追溯和原文页
 - 同源响应式 Web 工作台，支持知识库、资料与流式问答操作
 
@@ -193,3 +194,35 @@ python -X pycache_prefix=data/cache/python -m pytest -q
 ## Demo 边界
 
 向量存储采用 SQLite JSON 加 Python 线性计算，适合教学和小数据集。生产环境可以保持 `RetrievalService` 上层不变，将 Dense 检索替换为 pgvector、Qdrant 或 Milvus。当前不包含 Agent、MCP、权限、多租户和知识图谱。
+
+## 会话问答
+
+进入工作台的“问答”页，新建会话后可选择资料范围；不勾选时使用当前知识库全部资料。首次提问后固定范围，支持连续追问、停止生成、复制回答及最后一条失败回答重试。点击回答中的编号查看原始证据，再进入关联 Wiki。
+
+创建会话（接口响应使用统一 success/data 包装）：
+
+```http
+POST /api/v1/sessions
+Content-Type: application/json
+
+{"knowledge_base_id":"<kb_id>","knowledge_ids":[],"title":"新会话"}
+```
+
+返回 201，data 包含 id、title、knowledge_base_id、knowledge_ids、active_turn、created_at、updated_at。使用返回的 id 发起问答：
+
+```http
+POST /api/v1/chat
+Content-Type: application/json
+
+{"session_id":"<session_id>","query":"它有哪些使用限制？","knowledge_base_ids":["<kb_id>"],"knowledge_ids":[]}
+```
+
+流返回 start（消息/轮次 ID）、references、多个 answer（delta）及 done（status=completed/stopped）；失败返回 error（answer_failed）。停止请求为 POST /api/v1/sessions/<session_id>/stop，响应示例：
+
+```json
+{"success":true,"data":{"stopped":true}}
+```
+
+刷新页面可恢复已保存的消息；意外退出的生成在两分钟未续期后恢复为已停止。旧记录自动迁移到“旧会话 · 只读”，无须重新处理知识库。旧接口首次传入未知 session_id 时仍可自动创建会话，但每个会话只允许一个知识库及固定资料范围。
+
+默认离线模式仍无需 API Key，追问通过补充上一问题辅助检索；配置真实模型后才启用模型追问改写。此次更新不新增依赖、不改变向量维度。

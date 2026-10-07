@@ -1,8 +1,7 @@
 const API = (window.MY_WIKI_API_BASE || document.querySelector('meta[name="api-base"]')?.content || '/api/v1').replace(/\/$/, '');
 const requestedView = new URLSearchParams(location.search).get('view');
 const initialView = ['documents','wiki','ask'].includes(requestedView) ? requestedView : 'documents';
-const state = { bases: [], activeId: null, documents: [], wikiPages: [], wikiAllPages: [], activeWikiPage: null, progressDocumentId: null, wikiMode: 'reader', view: initialView, tab: 'file', sessionId: localStorage.getItem('wiki-session') || crypto.randomUUID() };
-localStorage.setItem('wiki-session', state.sessionId);
+const state = { bases: [], activeId: null, documents: [], wikiPages: [], wikiAllPages: [], activeWikiPage: null, progressDocumentId: null, wikiMode: 'reader', view: initialView, tab: 'file', sessionId: null, sessions: [], legacySessions: [], chatMessages: [], chatRun: null, chatEpoch: 0, chatLoading: false, hasOlder: false };
 
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value = '') => String(value).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
@@ -112,21 +111,6 @@ async function checkHealth() {
   catch { $('#healthText').textContent='连接失败'; }
 }
 
-async function loadChatHistory() {
-  try {
-    const messages = await request(`/sessions/${encodeURIComponent(state.sessionId)}/messages`);
-    if (!messages.length) return;
-    $('#chatLog').innerHTML = '';
-    for (const message of messages) {
-      const entry = addMessage(message.role, message.content);
-      if (message.role !== 'assistant' || !message.references_json) continue;
-      let references;
-      try { references = JSON.parse(message.references_json); } catch { references = []; }
-      appendReferences(entry, references);
-    }
-  } catch (error) { toast(`聊天记录加载失败：${error.message}`, true); }
-}
-
 async function loadBases() {
   try {
     state.bases = await request('/knowledge-bases');
@@ -144,16 +128,19 @@ function renderBases() {
 }
 
 async function selectBase(id) {
+  if (state.activeId !== id) { detachChat(); state.sessions=[]; state.legacySessions=[]; renderSessions(); renderChat(); }
   state.activeId=id; state.progressDocumentId=null; renderBases();
   const base=state.bases.find(x=>x.id===id); $('#activeKbName').textContent=base?.name || '知识库';
   $('#workspaceTitle').textContent=base?.name || '知识库';
   $('#addDocumentBtn').disabled=false; $('#question').disabled=false; $('#chatForm button').disabled=false;
   await loadDocuments();
+  if (state.activeId !== id) return;
+  await loadSessions(true);
   if(state.view==='wiki') loadWikiProgress();
 }
 
 async function loadDocuments() {
-  try { state.documents=await request(`/knowledge-bases/${state.activeId}/knowledge`); renderDocuments(); }
+  try { const kbId=state.activeId, documents=await request(`/knowledge-bases/${kbId}/knowledge`); if(kbId!==state.activeId)return; state.documents=documents; renderDocuments(); renderChatScope(); }
   catch(error){ toast(error.message,true); }
 }
 
@@ -499,52 +486,268 @@ async function viewStages(documentId) {
   } catch(error){ body.innerHTML=`<p class="muted">${escapeHtml(error.message)}</p>`; }
 }
 
-function addMessage(role, text='') {
-  const article=document.createElement('article'); article.className=`message ${role}`;
-  article.innerHTML=`<span class="avatar">${role==='user'?'你':'W'}</span><div><p></p></div>`; article.querySelector('p').textContent=text;
-  $('#chatLog').append(article); $('#chatLog').scrollTop=$('#chatLog').scrollHeight; return article;
+
+function activeSession() {
+  return [...state.sessions, ...state.legacySessions].find(item=>item.id===state.sessionId);
 }
 
-function appendReferences(message, references = []) {
-  if (!references.length) return;
-  const refs=document.createElement('div'); refs.className='references';
-  refs.innerHTML=references.map(r=>`<button class="reference" data-ref-wiki="${escapeHtml(r.wiki_slug||'')}" data-ref-knowledge="${escapeHtml(r.knowledge_id||'')}">[${r.index}] ${escapeHtml(r.knowledge_title)}${r.page_number?` · P${r.page_number}`:''}</button>`).join('');
-  message.querySelector('div').append(refs);
-  refs.querySelectorAll('button').forEach(button=>button.onclick=()=>button.dataset.refWiki?(switchView('wiki'),openWikiSlug(button.dataset.refWiki)):viewChunks(button.dataset.refKnowledge));
+function detachChat() {
+  state.chatEpoch+=1;
+  if(state.chatRun) state.chatRun.controller.abort();
+  clearTimeout(loadChatHistory.timer);
+  state.chatRun=null; state.chatLoading=false; state.sessionId=null; state.chatMessages=[]; state.hasOlder=false;
 }
 
-async function ask(question) {
-  addMessage('user',question); const answer=addMessage('assistant',''); const paragraph=answer.querySelector('p');
+function resetChat() {
+  detachChat();
+  if(state.activeId) localStorage.removeItem('wiki-session:'+state.activeId);
+  renderSessions(); renderChatScope(); renderChat();
+}
+
+async function loadSessions(restore=false) {
+  const kbId=state.activeId, epoch=state.chatEpoch;
+  if(!kbId)return;
   try {
-    const response=await fetch(API+'/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:state.sessionId,query:question,knowledge_base_ids:[state.activeId]})});
-    if(!response.ok){ const data=await response.json(); throw new Error(data.error?.message || '问答请求失败'); }
-    if (!response.body) throw new Error('浏览器未提供流式响应');
-    const reader=response.body.getReader(), decoder=new TextDecoder(); let buffer='', terminal=false;
-    while(true){ const {value,done}=await reader.read(); if(done)break; buffer+=decoder.decode(value,{stream:true}); const events=buffer.split('\n\n'); buffer=events.pop();
-      for(const block of events){ const type=block.match(/^event: (.+)$/m)?.[1], raw=block.match(/^data: (.+)$/m)?.[1]; if(!raw)continue; const data=JSON.parse(raw);
-        if(type==='answer'){ paragraph.textContent+=data.delta; $('#chatLog').scrollTop=$('#chatLog').scrollHeight; }
-        if(type==='references') appendReferences(answer, data.references);
-        if(type==='done') terminal=true;
-        if(type==='error'){ terminal=true; throw new Error(data.message); }
-      }
+    const [sessions, legacy]=await Promise.all([request('/sessions?knowledge_base_id='+encodeURIComponent(kbId)),request('/sessions?legacy=true')]);
+    if(kbId!==state.activeId||epoch!==state.chatEpoch)return;
+    state.sessions=sessions; state.legacySessions=legacy; renderSessions();
+    if(restore) {
+      const saved=localStorage.getItem('wiki-session:'+kbId);
+      if(sessions.some(item=>item.id===saved)) await selectSession(saved);
+      else resetChat();
+    } else updateChatControls();
+  } catch(error){ toast('会话加载失败：'+error.message,true); }
+}
+
+function renderSessions() {
+  for(const [selector,sessions] of [['#sessionList',state.sessions],['#legacySessionList',state.legacySessions]]) {
+    const list=$(selector); list.replaceChildren();
+    if(!sessions.length) { const p=document.createElement('p'); p.className='muted'; p.textContent='暂无会话'; list.append(p); }
+    for(const session of sessions) {
+      const button=document.createElement('button'); button.className='session-item'+(session.id===state.sessionId?' active':'');
+      button.setAttribute('aria-current',String(session.id===state.sessionId));
+      const title=document.createElement('strong'),meta=document.createElement('small'); title.textContent=session.title;
+      meta.textContent=(session.active_turn?'正在生成 · ':'')+new Date(session.updated_at).toLocaleDateString('zh-CN');
+      button.append(title,meta); button.onclick=()=>selectSession(session.id); list.append(button);
     }
-    if (!terminal) throw new Error('问答流意外中断，请重试');
-  } catch(error){ paragraph.textContent=`出错了：${error.message}`; toast(error.message,true); }
+  }
+}
+
+async function selectSession(id) {
+  detachChat(); state.sessionId=id;
+  const session=activeSession();
+  if(session?.knowledge_base_id) localStorage.setItem('wiki-session:'+state.activeId,id);
+  renderSessions(); renderChatScope(); renderChat();
+  await loadChatHistory();
+}
+
+async function loadChatHistory(older=false) {
+  const sid=state.sessionId,epoch=state.chatEpoch;
+  if(!sid)return;
+  state.chatLoading=true; updateChatControls();
+  const cursor=older&&state.chatMessages.length?'&before='+encodeURIComponent(state.chatMessages[0].id):'';
+  try {
+    const messages=await request('/sessions/'+encodeURIComponent(sid)+'/messages?limit=30'+cursor);
+    if(epoch!==state.chatEpoch||sid!==state.sessionId)return;
+    const previousHeight=$('#chatLog').scrollHeight,previousTop=$('#chatLog').scrollTop;
+    state.chatMessages=older?[...messages,...state.chatMessages]:messages;
+    state.hasOlder=messages.length===30;
+    renderChat();
+    if(older)$('#chatLog').scrollTop=previousTop+$('#chatLog').scrollHeight-previousHeight;
+    const generating=state.chatMessages.some(m=>['generating','stopping'].includes(m.status));
+    const session=activeSession(); if(session&&!generating) session.active_turn=null;
+    if(generating&&!state.chatRun) loadChatHistory.timer=setTimeout(()=>loadChatHistory(),1500);
+  } catch(error){ if(epoch===state.chatEpoch)toast('聊天记录加载失败：'+error.message,true); }
+  finally { if(epoch===state.chatEpoch){state.chatLoading=false;updateChatControls();} }
+}
+
+function renderChatScope() {
+  const session=activeSession(), root=$('#scopeDocuments');
+  const previous=[...root.querySelectorAll('input:checked')].map(input=>input.value);
+  const selected=session?.knowledge_ids||previous;
+  root.replaceChildren();
+  for(const doc of state.documents) {
+    const label=document.createElement('label'),input=document.createElement('input');
+    input.type='checkbox'; input.value=doc.id; input.checked=selected.includes(doc.id); input.disabled=Boolean(session)||Boolean(state.chatRun)||doc.parse_status!=='completed';
+    input.onchange=updateScopeSummary;
+    label.append(input,document.createTextNode(doc.title+(doc.parse_status==='completed'?'':'（尚不可检索）')));root.append(label);
+  }
+  if(!state.documents.length)root.textContent='尚无资料，请先到“资料”上传文档。';
+  if(session?.knowledge_ids.some(id=>!state.documents.some(doc=>doc.id===id))) {
+    const p=document.createElement('p');p.textContent='部分限定资料已删除，请新建会话选择范围。';root.append(p);
+  }
+  updateScopeSummary();
+}
+
+function updateScopeSummary() {
+  const session=activeSession();
+  const count=session?session.knowledge_ids.length:$('#scopeDocuments').querySelectorAll('input:checked').length;
+  $('#scopeSummary').textContent=session&&!session.knowledge_base_id?'旧会话 · 范围未知，仅供查看':'检索范围：'+(count?count+' 份指定资料':'当前知识库全部资料');
+}
+
+function updateChatControls() {
+  const session=activeSession(), legacy=session&&!session.knowledge_base_id;
+  const busy=Boolean(state.chatRun)||state.chatMessages.some(m=>['generating','stopping'].includes(m.status));
+  const unavailable=!state.activeId||Boolean(legacy)||busy||state.chatLoading;
+  $('#question').disabled=unavailable; $('#sendQuestionBtn').disabled=unavailable;
+  $('#sendQuestionBtn').hidden=busy; $('#stopAnswerBtn').hidden=!busy;
+  $('#stopAnswerBtn').disabled=!state.sessionId;
+  for(const id of ['renameSessionBtn','clearChatBtn','deleteSessionBtn']) $('#'+id).disabled=!session||busy||state.chatLoading;
+  $('#newSessionBtn').disabled=!state.activeId;
+  $('#sessionTitle').textContent=session?.title||'新的研究问题';
+  $('#olderMessagesBtn').hidden=!state.hasOlder; $('#olderMessagesBtn').disabled=busy||state.chatLoading;
+  $('#chatStatus').textContent=legacy?'旧记录保留原始内容；新提问请新建会话。':busy?'正在查阅资料并生成回答…':!state.documents.length?'当前知识库尚无资料，请先上传。':'答案基于所选资料；离线模式提供摘取式回答。';
+}
+
+function renderChat() {
+  const log=$('#chatLog'),scrollTop=log.scrollTop,nearBottom=log.scrollHeight-scrollTop-log.clientHeight<80;
+  log.replaceChildren();
+  if(!state.chatMessages.length) {
+    const empty=document.createElement('div');empty.className='chat-empty';
+    empty.innerHTML='<span>“</span><h3>从一个问题开始</h3><p>查找事实、梳理概念，或继续追问。<br>回答中的引用会带你回到原始资料。</p>';
+    log.append(empty);
+  }
+  for(const message of state.chatMessages) log.append(renderChatMessage(message));
+  log.scrollTop=nearBottom?log.scrollHeight:scrollTop;
+  updateChatControls();
+}
+
+function renderChatMessage(message) {
+  const article=document.createElement('article');article.className='message '+message.role;
+  const avatar=document.createElement('span');avatar.className='avatar';avatar.textContent=message.role==='user'?'你':'W';
+  const body=document.createElement('div');body.className='message-body';
+  let references=[];try{references=JSON.parse(message.references_json||'[]');}catch{}
+  const content=message.role==='assistant'?renderMarkdown(message.content||''):document.createElement('p');
+  if(message.role==='user')content.textContent=message.content;
+  // Only transform text nodes outside code blocks; model output never becomes raw HTML.
+  if(message.role==='assistant') {
+    const walker=document.createTreeWalker(content,NodeFilter.SHOW_TEXT),nodes=[];
+    while(walker.nextNode())if(!walker.currentNode.parentElement.closest('code,pre,button'))nodes.push(walker.currentNode);
+    for(const node of nodes) {
+      const matches=[...node.textContent.matchAll(/\[(\d+)\]/g)];if(!matches.length)continue;
+      const fragment=document.createDocumentFragment();let offset=0;
+      for(const match of matches){fragment.append(document.createTextNode(node.textContent.slice(offset,match.index)));const ref=references.find(r=>r.index===Number(match[1]));
+        if(ref){const button=document.createElement('button');button.className='citation';button.textContent=match[0];button.setAttribute('aria-label','查看引用 '+match[1]);button.onclick=()=>showChatReference(ref);fragment.append(button);}
+        else fragment.append(document.createTextNode(match[0]));offset=match.index+match[0].length;
+      }
+      fragment.append(document.createTextNode(node.textContent.slice(offset)));node.replaceWith(fragment);
+    }
+    content.querySelectorAll('[data-wiki-slug]').forEach(button=>{button.disabled=!activeSession()?.knowledge_base_id;button.onclick=()=>{switchView('wiki');openWikiSlug(button.dataset.wikiSlug);};});
+  }
+  body.append(content);
+  if(references.length) {
+    const refs=document.createElement('div');refs.className='references';
+    for(const ref of references){const button=document.createElement('button');button.className='reference';button.textContent='['+ref.index+'] '+ref.knowledge_title+(ref.page_number?' · P'+ref.page_number:'');button.onclick=()=>showChatReference(ref);refs.append(button);}body.append(refs);
+  }
+  if(message.role==='assistant') {
+    const actions=document.createElement('div');actions.className='message-actions';
+    const status=document.createElement('span');status.textContent=({generating:'生成中',stopping:'正在停止',completed:'已完成',failed:'生成失败 · 已保留内容',stopped:'已停止 · 内容可能不完整'})[message.status]||'';actions.append(status);
+    const copy=document.createElement('button');copy.className='text-btn';copy.textContent='复制';copy.disabled=!message.content;
+    copy.onclick=async()=>{try{await navigator.clipboard.writeText(message.content);toast('已复制回答');}catch{toast('复制失败，请手动选择文本',true);}};actions.append(copy);
+    if(['failed','stopped'].includes(message.status)&&message===state.chatMessages.at(-1)&&activeSession()?.knowledge_base_id) {
+      const retry=document.createElement('button');retry.className='text-btn';retry.textContent='重新生成';retry.disabled=Boolean(state.chatRun);
+      retry.onclick=()=>{const user=state.chatMessages.find(m=>m.turn_id===message.turn_id&&m.role==='user');if(user)ask(user.content,message.id);};actions.append(retry);
+    }
+    body.append(actions);
+  }
+  article.append(avatar,body);return article;
+}
+
+async function showChatReference(ref) {
+  const dialog=$('#viewerDialog'),body=$('#viewerBody');
+  $('#viewerTitle').textContent='['+ref.index+'] '+ref.knowledge_title;
+  body.replaceChildren();
+  const meta=document.createElement('p');meta.className='chunk-meta';meta.textContent=[ref.heading_path,ref.page_number?'第 '+ref.page_number+' 页':''].filter(Boolean).join(' · ');
+  const excerpt=document.createElement('pre');excerpt.className='chunk-content';excerpt.textContent=ref.content||'无片段快照';
+  const availability=document.createElement('p');availability.className='muted';availability.textContent='正在核对来源…';
+  body.append(meta,excerpt,availability);if(!dialog.open)dialog.showModal();
+  const epoch=state.chatEpoch;
+  try {
+    const chunks=await request('/knowledge/'+encodeURIComponent(ref.knowledge_id)+'/chunks');
+    if(epoch!==state.chatEpoch||!body.contains(availability))return;
+    const valid=chunks.some(chunk=>chunk.id===ref.chunk_id);
+    availability.textContent=valid?'以上为回答时的证据片段。':'来源已重新处理或该片段已移除；以上保留回答时的快照。';
+    if(valid&&ref.wiki_slug&&ref.knowledge_base_id===state.activeId){const button=document.createElement('button');button.className='button';button.textContent='阅读关联 Wiki';button.onclick=()=>{dialog.close();switchView('wiki');openWikiSlug(ref.wiki_slug);};body.append(button);}
+  }catch{availability.textContent='原始来源已删除或暂不可访问；以上保留回答时的快照。';}
+}
+
+async function ask(question,retryId=null) {
+  if(state.chatRun||state.chatLoading)return;
+  const epoch=state.chatEpoch,controller=new AbortController(),run={controller};state.chatRun=run;updateChatControls();
+  let answer;
+  try {
+    if(!state.sessionId) {
+      const ids=[...$('#scopeDocuments').querySelectorAll('input:checked')].map(input=>input.value);
+      const session=await request('/sessions',{method:'POST',headers:{'Content-Type':'application/json'},signal:controller.signal,body:JSON.stringify({knowledge_base_id:state.activeId,knowledge_ids:ids})});
+      if(epoch!==state.chatEpoch)return;
+      state.sessions.unshift(session);state.sessionId=session.id;localStorage.setItem('wiki-session:'+state.activeId,session.id);renderSessions();renderChatScope();
+    }
+    const session=activeSession();
+    if(!session?.knowledge_base_id)throw Error('旧会话仅供查看，请新建会话');
+    const response=await fetch(API+'/chat',{method:'POST',headers:{'Content-Type':'application/json'},signal:controller.signal,body:JSON.stringify({session_id:session.id,query:question,knowledge_base_ids:[session.knowledge_base_id],knowledge_ids:session.knowledge_ids,retry_message_id:retryId})});
+    if(!response.ok){const payload=await response.json();throw Error(payload.error?.message||'问答请求失败');}
+    if(epoch!==state.chatEpoch)return;
+    if(!response.body)throw Error('浏览器未提供流式响应');
+    $('#question').value='';
+    if(retryId){answer=state.chatMessages.find(m=>m.id===retryId);answer.content='';answer.references_json='[]';answer.status='generating';}
+    else {state.chatMessages.push({role:'user',content:question,status:'completed'});answer={role:'assistant',content:'',status:'generating'};state.chatMessages.push(answer);}
+    renderChat();
+    const reader=response.body.getReader(),decoder=new TextDecoder();let buffer='',terminal=false;
+    const consume=block=>{
+      const lines=block.split('\n'),type=lines.find(line=>line.startsWith('event:'))?.slice(6).trim();
+      const raw=lines.filter(line=>line.startsWith('data:')).map(line=>line.slice(5).trimStart()).join('\n');if(!raw)return;
+      const data=JSON.parse(raw);
+      if(type==='start'){answer.id=data.message_id;answer.turn_id=data.turn_id;const user=state.chatMessages.at(-2);if(user?.role==='user')user.turn_id=data.turn_id;}
+      if(type==='references')answer.references_json=JSON.stringify(data.references);
+      if(type==='answer')answer.content+=data.delta;
+      if(type==='done'||type==='error'){terminal=true;answer.status=data.status||(type==='error'?'failed':'completed');if(type==='error')toast(data.message,true);}
+    };
+    while(true){const {value,done}=await reader.read();if(epoch!==state.chatEpoch){await reader.cancel();return;}
+      buffer+=decoder.decode(value||new Uint8Array(),{stream:!done});buffer=buffer.replace(/\r\n/g,'\n');
+      let separator;while((separator=buffer.indexOf('\n\n'))!==-1){consume(buffer.slice(0,separator));buffer=buffer.slice(separator+2);}
+      if(done){if(buffer.trim())consume(buffer);break;}renderChat();
+    }
+    if(!terminal)throw Error('连接已中断，正在恢复已保存的回答');
+  } catch(error) {
+    if(epoch===state.chatEpoch){if(answer&&answer.status==='generating')answer.status=error.name==='AbortError'?'stopped':'failed';if(error.name!=='AbortError')toast(error.message,true);}
+  } finally {
+    if(epoch===state.chatEpoch&&state.chatRun===run){state.chatRun=null;renderChat();await loadSessions();if(state.sessionId)await loadChatHistory();}
+  }
+}
+
+async function stopAnswer() {
+  if(!state.sessionId)return;
+  const sid=state.sessionId;
+  try { await request('/sessions/'+encodeURIComponent(sid)+'/stop',{method:'POST'});if(sid===state.sessionId)$('#chatStatus').textContent='正在停止并保存回答…'; }
+  catch(error){toast('停止失败：'+error.message,true);}
 }
 
 async function clearChat() {
-  const oldSessionId = state.sessionId;
-  try {
-    await request(`/sessions/${encodeURIComponent(oldSessionId)}/messages`, {method:'DELETE'});
-    state.sessionId=crypto.randomUUID(); localStorage.setItem('wiki-session',state.sessionId);
-    $('#chatLog').innerHTML=''; addMessage('assistant','新的一页。你想了解什么？');
-  } catch(error){ toast(`清空失败：${error.message}`,true); }
+  if(!state.sessionId||!confirm('清空当前会话的全部消息？'))return;
+  const sid=state.sessionId,epoch=state.chatEpoch;
+  try{await request('/sessions/'+encodeURIComponent(sid)+'/messages',{method:'DELETE'});if(epoch===state.chatEpoch)await loadChatHistory();}catch(error){toast(error.message,true);}
+}
+
+async function renameSession() {
+  const session=activeSession();if(!session)return;const title=prompt('会话名称',session.title)?.trim();if(!title)return;
+  try{await request('/sessions/'+encodeURIComponent(session.id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({title})});await loadSessions();}catch(error){toast(error.message,true);}
+}
+
+async function deleteSession() {
+  if(!state.sessionId||!confirm('删除当前会话及全部消息？'))return;
+  const sid=state.sessionId,epoch=state.chatEpoch;
+  try{await request('/sessions/'+encodeURIComponent(sid),{method:'DELETE'});if(epoch===state.chatEpoch){resetChat();await loadSessions();}}catch(error){toast(error.message,true);}
 }
 
 $('#newKbBtn').onclick=()=>$('#kbDialog').showModal();
 $('#addDocumentBtn').onclick=()=>$('#documentDialog').showModal();
 $('#clearKbBtn').onclick=clearKnowledgeBase;
 $('#clearChatBtn').onclick=clearChat;
+$('#newSessionBtn').onclick=resetChat;
+$('#renameSessionBtn').onclick=renameSession;
+$('#deleteSessionBtn').onclick=deleteSession;
+$('#stopAnswerBtn').onclick=stopAnswer;
+$('#olderMessagesBtn').onclick=()=>loadChatHistory(true);
 document.querySelectorAll('.view-tabs button').forEach(button=>button.onclick=()=>switchView(button.dataset.view));
 $('#newWikiPageBtn').onclick=()=>openWikiEditor();
 document.querySelectorAll('[data-wiki-mode]').forEach(button=>button.onclick=()=>setWikiMode(button.dataset.wikiMode));
@@ -577,10 +780,10 @@ $('#wikiEditorForm').onsubmit=async event=>{ event.preventDefault(); const form=
   } catch(error){ toast(error.message,true); } });
 };
 
-$('#chatForm').onsubmit=event=>{ event.preventDefault(); const input=$('#question'), question=input.value.trim(); if(!question||!state.activeId)return; input.value=''; ask(question); };
-$('#question').onkeydown=event=>{ if(event.key==='Enter'&&!event.shiftKey){ event.preventDefault(); $('#chatForm').requestSubmit(); } };
+$('#chatForm').onsubmit=event=>{ event.preventDefault(); const input=$('#question'), question=input.value.trim(); if(!question||!state.activeId||state.chatRun||state.chatLoading)return; ask(question); };
+$('#question').onkeydown=event=>{ if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){ event.preventDefault(); $('#chatForm').requestSubmit(); } };
 
-switchView(initialView); checkHealth(); loadBases(); loadChatHistory(); setInterval(async()=>{
+switchView(initialView); checkHealth(); loadBases(); setInterval(async()=>{
   if(state.activeId && state.documents.some(x=>['pending','processing'].includes(x.parse_status))) {
     await loadDocuments();
     if(state.view==='wiki') { loadWikiProgress(); loadWikiPages(); }
