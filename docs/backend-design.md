@@ -51,6 +51,23 @@ Wiki 与解析预览分离。`parsed.md` 是忠实保留页码、表格和图片
 
 切分采用显式父子结构：`parent_chunks` 保存按标题、页码和 `parent_chunk_size` 聚合的有界父块，`chunks.parent_id` 指向父块；只有子块生成 Embedding 和 FTS 索引。`RetrievalService` 在指定知识范围内对孩子执行 Dense 与 SQLite FTS5/BM25 检索，再用 RRF 融合并去重，命中后通过父块扩展 `context_content`。旧数据的 `chunks.parent_content` 仅作为迁移兼容回退，新入库不再重复写父内容。
 
+**检索 Pipeline（与 WeKnora 对齐）**：
+1. **召回阶段**：Dense（向量）+ Sparse（BM25/FTS5）并行检索
+2. **RRF 融合**：`fusion_score = vector_weight/(k+vector_rank) + keyword_weight/(k+keyword_rank)`，k、权重可配置（默认 k=60，权重 1:1）
+3. **去重**：基于 `content_hash` 去重
+4. **Reranker 重排序**（可选）：对候选结果应用深度语义模型重排序
+   - 离线模式：基于 jieba 分词的启发式排序
+   - 本地模式：FlagEmbedding（BGE-reranker-v2-m3）
+   - 复合评分：`0.6*rerank_score + 0.3*rrf_score + 0.1*position_prior`
+   - 阈值过滤（默认 0.3），保留最高分作为回退（最低 0.15）
+5. **MMR 多样性**（可选）：应用 Maximal Marginal Relevance 减少结果冗余
+   - 基于 Jaccard 相似度计算文本重叠
+   - Lambda 参数平衡相关性与多样性（默认 0.7）
+   - 增量算法：每轮只计算新选中项与剩余候选的相似度
+6. **截断与编号**：返回 Top-K 结果
+
+Reranker 通过 `app/infrastructure/rerank_provider.py` 管理，支持离线与本地模型两种模式，模型加载失败自动回退到离线实现。MMR 集成在 `RetrievalService._apply_mmr`，使用 jieba 分词和 Jaccard 相似度。配置项包括 `RERANK_ENABLED`、`RERANK_MODEL`、`RERANK_THRESHOLD`、`RRF_K`、`VECTOR_WEIGHT`、`KEYWORD_WEIGHT`、`MMR_ENABLED`、`MMR_LAMBDA`。
+
 `RagService` 组装受长度限制的引用上下文，通过 SSE 依次发送 `references`、`answer`、`done`；失败发送 `error`。
 
 ## 存储与配置

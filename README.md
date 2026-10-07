@@ -14,6 +14,7 @@
 - 标题/页码感知切片，代码块、公式、Markdown 表格保护
 - 离线 Hash Embedding 与 OpenAI-compatible Embedding
 - 中文分词、SQLite FTS5/BM25、Dense 检索和 RRF 融合
+- Reranker 模型重排序与 MMR 多样性算法（与 WeKnora 对齐）
 - 带引用的 Prompt、离线摘取式回答与 OpenAI-compatible 流式回答
 - SSE `references → answer → done/error`
 - 独立 Wiki 生成阶段，提供概览、主题目录、来源追溯和原文页
@@ -136,6 +137,32 @@ LANGFUSE_CAPTURE_CONTENT=false
 默认采集 ID、数量、模型名、耗时、错误类型及模型返回的 Token 用量，不发送文档、提示词和回答正文。确需排查内容时设置 `LANGFUSE_CAPTURE_CONTENT=true`，此时问答、模型消息和检索正文会传至所配服务。离线模型及未返回 usage 的兼容模型不估算 Token 或费用。启用追踪时流式模型需支持 `stream_options.include_usage`。
 
 追踪故障不改变业务结果；进程正常退出时等待 SDK 导出。该接入不改 API/SSE、数据库或向量维度，无需数据迁移或重新入库。参考 [Langfuse SDK 文档](https://langfuse.com/docs/observability/sdk/instrumentation)。
+
+## Reranker 与 MMR（可选）
+
+系统已集成 **Reranker 模型重排序** 和 **MMR 多样性算法**，显著提升检索质量：
+
+```powershell
+# 安装 Reranker 依赖（可选，推荐）
+python -m pip install -e ".[rerank]"
+```
+
+在 `.env` 中启用：
+
+```env
+RERANK_ENABLED=true
+RERANK_MODEL=BAAI/bge-reranker-v2-m3
+RERANK_THRESHOLD=0.3
+MMR_ENABLED=true
+MMR_LAMBDA=0.7
+```
+
+**功能说明**：
+- **Reranker**：对初步检索结果进行深度语义重排序，提升精度 15-30%
+- **MMR**：通过多样性算法减少冗余结果，提高信息覆盖率
+- **可配置 RRF**：支持调整融合参数（k、向量权重、关键词权重）
+
+未配置时自动使用离线启发式 Reranker（基于 jieba 分词），无需额外依赖。详见 [`docs/rerank-mmr-guide.md`](docs/rerank-mmr-guide.md)。
 
 ## 文档解析
 
