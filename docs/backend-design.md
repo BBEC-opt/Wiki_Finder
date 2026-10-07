@@ -68,7 +68,11 @@ Wiki 与解析预览分离。`parsed.md` 是忠实保留页码、表格和图片
 
 Reranker 通过 `app/infrastructure/rerank_provider.py` 管理，支持离线与本地模型两种模式，模型加载失败自动回退到离线实现。MMR 集成在 `RetrievalService._apply_mmr`，使用 jieba 分词和 Jaccard 相似度。配置项包括 `RERANK_ENABLED`、`RERANK_MODEL`、`RERANK_THRESHOLD`、`RRF_K`、`VECTOR_WEIGHT`、`KEYWORD_WEIGHT`、`MMR_ENABLED`、`MMR_LAMBDA`。
 
-`RagService` 组装受长度限制的引用上下文，通过 SSE 依次发送 `references`、`answer`、`done`；失败发送 `error`。
+RagService 先校验并固定会话的知识库及资料范围，再从已完成轮次选取最多三轮历史。真实模型把追问改写成独立检索问题，15 秒超时或失败时回退原问题；离线模式仅拼接最近问题作为检索上下文，不承诺模型级指代理解。继续复用现有 RetrievalService，不变更向量模型或索引。
+
+历史使用不超过 max_context_chars 的三分之一（最多 4000 字符），按完整轮次选取；证据使用扣除历史与当前问题后的剩余预算，首条超长证据也裁剪，序号重新从 1 编排。资料以转义后的 XML 数据块传给模型，不执行资料中的指令；无证据时使用确定性资料不足回答，不调用远端生成模型。
+
+SSE 依次发送 start、references、answer、done，生成失败发送 error。start 携带 session_id、turn_id、message_id、request_id；answer 保留 delta；done 增加 status（completed/stopped），error 使用固定提示和 answer_failed 错误码，不回显内部异常。每 15 秒发送心跳注释。消息 ID 在生成前分配，不随重试变化。
 
 ## 存储与配置
 
@@ -104,3 +108,29 @@ Reranker 通过 `app/infrastructure/rerank_provider.py` 管理，支持离线与
 - 默认仅写入统计和标识符，异常仅记录类型；`LANGFUSE_CAPTURE_CONTENT=true` 才记录问答、模型消息及检索正文，开启后这些数据将发送到配置的 Langfuse。完整上传文件、认证头和配置对象不进入追踪。SDK 操作失败输出固定告警，不回显异常内容、不改变业务结果。
 - 真实模型记录模型名及服务端 usage；开启追踪时对流式聊天请求加 `stream_options.include_usage`，兼容服务需支持该参数，usage-only 空 choices 事件正常处理。无 usage 不伪造计数；离线模型标记为 hash-embedding / extractive-offline。
 - API/SSE 与持久化契约无变化，不需要迁移或重新生成向量。自动测试使用真实 SDK 的内存 exporter，不访问 Langfuse 或付费模型；远端凭据就绪后还需上传示例资料并发起问答，在 Langfuse 审核层级、会话和用量。
+
+## 会话持久化与生命周期
+
+- chat_sessions 保存 id、title、knowledge_base_id（可空）、knowledge_ids_json、active_turn 和时间戳。一个会话固定一个知识库及资料集合；空集合表示全库。单会话跨知识库请求返回 422，已绑定范围不一致返回 409。
+- chat_messages 增加 turn_id 和 status；user 与 assistant 通过 turn_id 关联。回答状态为 generating → completed/failed/stopped，停止请求先记为 stopping。失败和未完成轮次不会进入后续模型历史。
+- Repository.begin_chat 在事务中条件更新 active_turn 并创建消息，确保同一会话仅一个生成请求；修改/清空/删除活跃会话返回 409。重试只允许最后一条 failed/stopped 回答，核对原问题后复用消息 ID 和问题记录，分配新 turn_id。
+- 生成任务与 SSE 消费协作运行，最多缓冲 32 个事件。每秒保存部分正文、引用并续期；每 250 毫秒检查停止状态。停止、客户端断连和生成器关闭都会取消上游并在屏蔽取消的作用域内保存最终状态。进程异常退出时，超过两分钟没有续期的轮次在读取历史/会话列表或再次发送时恢复为 stopped，保留最近一次快照。
+- SQLite 和 PostgreSQL 初始化均增量迁移消息字段，并为已有 session_id 补建“旧会话”。旧消息不删除、不猜测知识库；缺少范围的会话仅供查看、重命名、清空或删除。迁移幂等，不修改 Embedding 或已有知识，无需重新入库。
+- 引用持久化保留回答时的片段快照及 Chunk/Wiki 标识；资料删除、重处理后旧回答不会变成无来源空白，前端明确提示原始来源已失效。
+
+### 会话 API
+
+| 方法与路径（前缀 /api/v1） | 契约 |
+|---|---|
+| POST /sessions | knowledge_base_id、可选 knowledge_ids/title；201 返回会话 |
+| GET /sessions?knowledge_base_id=… | 当前知识库会话，按更新时间倒序；legacy=true 单独列出范围未知的旧会话 |
+| PATCH /sessions/{id} | title；更新会话标题 |
+| DELETE /sessions/{id} | 原子删除会话与消息 |
+| GET /sessions/{id}/messages | 保留 data 数组；limit 默认 100、范围 1–100，before 为消息 ID，返回页内正序记录 |
+| DELETE /sessions/{id}/messages | 保留旧接口，只清空消息 |
+| POST /sessions/{id}/stop | 请求停止，返回 data.stopped=true；最终状态通过 SSE 或历史确认 |
+| POST /chat | 保留旧字段，新增可选 retry_message_id；首次使用未知 session_id 时自动创建并绑定单知识库范围 |
+
+消息响应增补 turn_id/status，保留 references_json 字段以兼容旧消费者。旧 /chat 单知识库请求仍有效；旧客户端多知识库请求不再接受，需分别创建会话。建立流之前进行输入/范围/并发校验，之后的错误通过 SSE 返回。会话接口与现有系统一样面向本地单用户，不提供身份或租户隔离。
+
+追踪继续使用当前固定的 Langfuse SDK 4.16.0 和内容采集开关，新增问答逻辑不要求升级 SDK 或接入外部服务。取消和改写均沿用现有模型 Provider；自动测试使用本地假模型验证改写、失败、取消和引用约束。

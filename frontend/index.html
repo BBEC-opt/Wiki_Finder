@@ -70,14 +70,28 @@
         </section>
       </section>
       <section class="ask panel view-panel" data-view-panel="ask">
-        <div class="panel-head"><div><small>RESEARCH DESK</small><h2>问答台</h2></div><button class="text-btn" id="clearChatBtn">清空</button></div>
-        <div id="chatLog" class="chat-log">
-          <article class="message assistant"><span class="avatar">W</span><div><p>你好。选择知识库后，可以问我资料里的任何问题。</p></div></article>
+        <div class="panel-head"><div><small>RESEARCH DESK</small><h2>问答台</h2></div><span class="chat-caption">让每个答案都有出处</span></div>
+        <div class="chat-workspace">
+          <aside class="session-sidebar" aria-label="问答会话">
+            <button class="button dark" id="newSessionBtn">＋ 新建会话</button>
+            <div id="sessionList" class="session-list"></div>
+            <details class="legacy-sessions"><summary>旧会话 · 只读</summary><div id="legacySessionList"></div></details>
+          </aside>
+          <div class="conversation">
+            <div class="conversation-head"><strong id="sessionTitle">新的研究问题</strong><div class="panel-actions"><button class="text-btn" id="renameSessionBtn">重命名</button><button class="text-btn" id="clearChatBtn">清空</button><button class="text-btn" id="deleteSessionBtn">删除</button></div></div>
+            <details class="chat-scope"><summary id="scopeSummary">检索范围：当前知识库全部资料</summary><div id="scopeDocuments"></div><small>首次发送后固定范围；调整范围请新建会话。</small></details>
+            <button class="text-btn" id="olderMessagesBtn" hidden>加载更早的消息</button>
+            <div id="chatLog" class="chat-log" aria-label="聊天记录"></div>
+            <div id="chatStatus" class="chat-status" role="status" aria-live="polite"></div>
+            <form id="chatForm" class="composer">
+              <label class="sr-only" for="question">输入问题</label>
+              <textarea id="question" rows="2" maxlength="4000" placeholder="从资料中寻找答案…" disabled></textarea>
+              <button type="submit" id="sendQuestionBtn" aria-label="发送问题" disabled>↑</button>
+              <button type="button" id="stopAnswerBtn" hidden>停止</button>
+            </form>
+            <small class="composer-hint">Enter 发送 · Shift + Enter 换行 · 回答请结合原始证据核对</small>
+          </div>
         </div>
-        <form id="chatForm" class="composer">
-          <textarea id="question" rows="2" maxlength="4000" placeholder="从资料中寻找答案…" disabled></textarea>
-          <button aria-label="发送问题" disabled>↑</button>
-        </form>
       </section>
       </section>
     </section>

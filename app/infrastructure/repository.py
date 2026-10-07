@@ -5,6 +5,7 @@ from typing import Any
 from uuid import uuid4
 
 from app.infrastructure.database import Database
+from app.core.errors import AppError
 
 
 def now_iso() -> str:
@@ -784,23 +785,145 @@ class Repository:
         WHERE chunks_fts MATCH ? AND {where} AND k.parse_status='completed' ORDER BY bm25_score LIMIT ?"""
         return await self.query_all(sql, (query_tokens, *params, limit))
 
-    async def save_message(self, session_id: str, role: str, content: str, references=None) -> str:
-        mid = str(uuid4())
-        await self.execute(
-            "INSERT INTO chat_messages(id,session_id,role,content,references_json,created_at) VALUES (?,?,?,?,?,?)",
-            (mid, session_id, role, content, json.dumps(references, ensure_ascii=False) if references is not None else None, now_iso()),
+    async def chat_history(self, session_id: str, limit: int = 100, before: str | None = None) -> list[dict]:
+        params: list = [session_id]
+        condition = "session_id=?"
+        if before:
+            cursor = await self.query_one("SELECT created_at,id FROM chat_messages WHERE session_id=? AND id=?", (session_id, before))
+            if not cursor:
+                raise AppError("invalid_cursor", "消息分页位置不存在", 422)
+            condition += " AND (created_at < ? OR (created_at = ? AND id < ?))"
+            params.extend([cursor["created_at"], cursor["created_at"], cursor["id"]])
+        return await self.query_all(
+            f"SELECT * FROM (SELECT * FROM chat_messages WHERE {condition} ORDER BY created_at DESC,id DESC LIMIT ?) history ORDER BY created_at,id",
+            (*params, limit),
         )
-        return mid
 
-    async def chat_history(self, session_id: str, limit: int = 6) -> list[dict]:
-        rows = await self.query_all(
-            "SELECT * FROM (SELECT * FROM chat_messages WHERE session_id=? ORDER BY created_at DESC LIMIT ?) ORDER BY created_at",
-            (session_id, limit),
-        )
+    async def create_session(self, kb_id: str, knowledge_ids: list[str], title: str = "新会话", session_id: str | None = None) -> dict:
+        stamp, sid = now_iso(), session_id or str(uuid4())
+        await self.execute("""INSERT INTO chat_sessions(id,title,knowledge_base_id,knowledge_ids_json,created_at,updated_at)
+            VALUES (?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING""", (sid, title, kb_id, json.dumps(sorted(set(knowledge_ids))), stamp, stamp))
+        return await self.get_session(sid)
+
+    async def get_session(self, session_id: str) -> dict | None:
+        row = await self.query_one("SELECT * FROM chat_sessions WHERE id=?", (session_id,))
+        if row:
+            row["knowledge_ids"] = json.loads(row.pop("knowledge_ids_json"))
+        return row
+
+    async def list_sessions(self, kb_id: str | None, legacy: bool = False) -> list[dict]:
+        where, params = ("knowledge_base_id IS NULL", ()) if legacy else ("knowledge_base_id=?", (kb_id,))
+        rows = await self.query_all(f"SELECT * FROM chat_sessions WHERE {where} ORDER BY updated_at DESC,id", params)
+        for row in rows:
+            row["knowledge_ids"] = json.loads(row.pop("knowledge_ids_json"))
         return rows
 
+    async def mutate_session(self, session_id: str, operation: str, title: str = "") -> None:
+        db = await self.database.connect()
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            # 条件更新同时适用于 SQLite 事务锁和 PostgreSQL 行锁。
+            cursor = await db.execute("UPDATE chat_sessions SET updated_at=? WHERE id=? AND active_turn IS NULL", (now_iso(), session_id))
+            if not cursor.rowcount:
+                if not await self._one(db, "SELECT id FROM chat_sessions WHERE id=?", (session_id,)):
+                    raise AppError("session_not_found", "会话不存在", 404)
+                raise AppError("session_busy", "请先停止当前回答", 409)
+            if operation in {"clear", "delete"}:
+                await db.execute("DELETE FROM chat_messages WHERE session_id=?", (session_id,))
+            if operation == "delete":
+                await db.execute("DELETE FROM chat_sessions WHERE id=?", (session_id,))
+            elif operation == "rename":
+                await db.execute("UPDATE chat_sessions SET title=? WHERE id=?", (title, session_id))
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
+        finally:
+            await db.close()
+
     async def clear_chat_history(self, session_id: str) -> None:
-        await self.execute("DELETE FROM chat_messages WHERE session_id=?", (session_id,))
+        if await self.get_session(session_id):
+            await self.mutate_session(session_id, "clear")
+        else:
+            await self.execute("DELETE FROM chat_messages WHERE session_id=?", (session_id,))
+
+    async def recover_chat(self, session_id: str) -> None:
+        cutoff = (datetime.now(UTC) - timedelta(minutes=2)).isoformat()
+        db = await self.database.connect()
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute("UPDATE chat_sessions SET active_turn=NULL WHERE id=? AND active_turn IS NOT NULL AND updated_at<?", (session_id, cutoff))
+            if cursor.rowcount:
+                await db.execute("UPDATE chat_messages SET status='stopped' WHERE session_id=? AND status IN ('generating','stopping')", (session_id,))
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
+        finally:
+            await db.close()
+
+    async def begin_chat(self, session_id: str, query: str, retry_id: str | None = None) -> dict:
+        db = await self.database.connect()
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            turn_id, message_id = str(uuid4()), str(uuid4())
+            cursor = await db.execute("UPDATE chat_sessions SET active_turn=?,updated_at=? WHERE id=? AND active_turn IS NULL", (turn_id, now_iso(), session_id))
+            if not cursor.rowcount:
+                raise AppError("session_busy", "该会话正在生成回答", 409)
+            if retry_id:
+                previous = await self._one(db, "SELECT * FROM chat_messages WHERE id=? AND session_id=?", (retry_id, session_id))
+                latest = await self._one(db, "SELECT id FROM chat_messages WHERE session_id=? ORDER BY created_at DESC,id DESC LIMIT 1", (session_id,))
+                if not previous or previous["role"] != "assistant" or previous["status"] not in {"failed", "stopped"} or latest["id"] != retry_id:
+                    raise AppError("invalid_retry", "只能重试最后一条失败或停止的回答", 409)
+                user = await self._one(db, "SELECT content FROM chat_messages WHERE session_id=? AND turn_id=? AND role='user'", (session_id, previous["turn_id"]))
+                if not user or user["content"] != query:
+                    raise AppError("invalid_retry", "重试问题与原问题不一致", 422)
+                await db.execute("UPDATE chat_messages SET turn_id=? WHERE session_id=? AND turn_id=?", (turn_id, session_id, previous["turn_id"]))
+                message_id = retry_id
+                await db.execute("UPDATE chat_messages SET content='',references_json='[]',status='generating' WHERE id=?", (message_id,))
+            else:
+                await db.execute("INSERT INTO chat_messages(id,session_id,role,content,created_at,turn_id,status) VALUES (?,?,'user',?,?,?,'completed')", (str(uuid4()), session_id, query, now_iso(), turn_id))
+                await db.execute("INSERT INTO chat_messages(id,session_id,role,content,created_at,turn_id,status) VALUES (?,?,'assistant','',?,?,'generating')", (message_id, session_id, now_iso(), turn_id))
+            await db.execute("UPDATE chat_sessions SET title=? WHERE id=? AND title='新会话'", (query[:40], session_id))
+            await db.commit()
+            return {"turn_id": turn_id, "message_id": message_id}
+        except BaseException:
+            await db.rollback()
+            raise
+        finally:
+            await db.close()
+
+    async def checkpoint_chat(self, session_id: str, turn_id: str, content: str, references: list, status: str = "generating") -> None:
+        db = await self.database.connect()
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute("UPDATE chat_sessions SET updated_at=? WHERE id=? AND active_turn=?", (now_iso(), session_id, turn_id))
+            if cursor.rowcount:
+                # 正文检查点不能覆盖并发提交的停止请求。
+                await db.execute("""UPDATE chat_messages SET content=?,references_json=?,
+                    status=CASE WHEN status='stopping' AND ?='generating' THEN 'stopping' ELSE ? END
+                    WHERE session_id=? AND turn_id=? AND role='assistant'""", (content, json.dumps(references, ensure_ascii=False), status, status, session_id, turn_id))
+                if status != "generating":
+                    await db.execute("UPDATE chat_sessions SET active_turn=NULL WHERE id=? AND active_turn=?", (session_id, turn_id))
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
+        finally:
+            await db.close()
+
+    async def stop_chat(self, session_id: str) -> None:
+        await self.execute("UPDATE chat_messages SET status='stopping' WHERE session_id=? AND role='assistant' AND status='generating'", (session_id,))
+
+    async def chat_stopped(self, session_id: str, turn_id: str) -> bool:
+        row = await self.query_one("SELECT status FROM chat_messages WHERE session_id=? AND turn_id=? AND role='assistant'", (session_id, turn_id))
+        return not row or row["status"] != "generating"
+
+    async def completed_history(self, session_id: str, limit: int = 6) -> list[dict]:
+        return await self.query_all("""SELECT * FROM (SELECT m.* FROM chat_messages m
+            WHERE m.session_id=? AND m.turn_id IN
+            (SELECT turn_id FROM chat_messages WHERE session_id=? AND role='assistant' AND status='completed')
+            ORDER BY m.created_at DESC,m.id DESC LIMIT ?) history ORDER BY created_at,id""", (session_id, session_id, limit))
 
     async def delete_knowledge(self, knowledge_id: str) -> None:
         row = await self.get_knowledge(knowledge_id)

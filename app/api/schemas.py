@@ -43,6 +43,34 @@ class SearchRequest(BaseModel):
 
 class ChatRequest(SearchRequest):
     session_id: str = Field(min_length=1, max_length=100)
+    retry_message_id: str | None = Field(None, max_length=100)
+
+    @model_validator(mode="after")
+    def strip_query(self):
+        self.query = self.query.strip()
+        if not self.query:
+            raise ValueError("问题不能为空")
+        return self
+
+
+class SessionCreate(BaseModel):
+    knowledge_base_id: str
+    knowledge_ids: list[str] = Field(default_factory=list, max_length=100)
+    title: str = Field(default="新会话", min_length=1, max_length=100)
+
+
+class SessionUpdate(BaseModel):
+    title: str = Field(min_length=1, max_length=100)
+
+
+class ChatSession(BaseModel):
+    id: str
+    title: str
+    knowledge_base_id: str | None = None
+    knowledge_ids: list[str]
+    active_turn: str | None = None
+    created_at: str
+    updated_at: str
 
 
 class Health(BaseModel):
@@ -133,6 +161,8 @@ class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str
     references_json: str | None = None
+    turn_id: str | None = None
+    status: str = "completed"
     created_at: str
 
 
@@ -271,3 +301,19 @@ class ErrorDetail(BaseModel):
 class ErrorResponse(BaseModel):
     success: Literal[False] = False
     error: ErrorDetail
+
+
+class SessionResponse(SuccessResponse):
+    data: ChatSession
+
+
+class SessionListResponse(SuccessResponse):
+    data: list[ChatSession]
+
+
+class StopResult(BaseModel):
+    stopped: bool
+
+
+class StopResponse(SuccessResponse):
+    data: StopResult

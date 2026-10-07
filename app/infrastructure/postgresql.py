@@ -93,6 +93,11 @@ def _postgres_schema() -> list[str]:
         statement = statement.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY")
         statements.append(statement)
     statements.extend([
+        "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS turn_id TEXT",
+        "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completed'",
+        """INSERT INTO chat_sessions(id,title,created_at,updated_at)
+            SELECT session_id,'旧会话',MIN(created_at),MAX(created_at) FROM chat_messages GROUP BY session_id
+            ON CONFLICT(id) DO NOTHING""",
         """CREATE TABLE IF NOT EXISTS chunks_fts (
           chunk_id TEXT PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
           title_tokens TEXT NOT NULL, heading_tokens TEXT NOT NULL, content_tokens TEXT NOT NULL,

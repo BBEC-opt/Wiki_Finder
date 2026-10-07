@@ -181,7 +181,8 @@ def test_chat_stream_reports_retrieval_errors_as_sse(tmp_path: Path):
         })
         assert response.status_code == 200
         assert "event: error" in response.text
-        assert "retrieval unavailable" in response.text
+        assert "answer_failed" in response.text
+    assert "retrieval unavailable" not in response.text
 
 
 def test_clear_knowledge_base_keeps_base_and_removes_contents(tmp_path: Path):

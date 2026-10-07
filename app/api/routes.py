@@ -1,13 +1,13 @@
 import json
 from pathlib import Path
 
-from fastapi import APIRouter, File, Request, UploadFile
+from fastapi import APIRouter, File, Query, Request, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 
 from app.core.errors import AppError
 from app.api.schemas import (
     ArtifactResponse, ChatRequest, ChunkListResponse, ClearedResponse, DeletedResponse, HealthResponse,
-    ErrorResponse,
+    ErrorResponse, SessionCreate, SessionUpdate, SessionResponse, SessionListResponse, StopResponse,
     KnowledgeBaseCreate, KnowledgeBaseListResponse, KnowledgeBaseResponse,
     KnowledgeListResponse, KnowledgeResponse, ManualKnowledgeCreate, MessageListResponse,
     ParserPreviewResponse, SearchRequest, SearchResponse, StageListResponse,
@@ -343,18 +343,61 @@ async def search(body: SearchRequest, request: Request):
 
 @router.post("/chat")
 async def chat(body: ChatRequest, request: Request):
+    turn = await request.app.state.rag.prepare(body)
     return StreamingResponse(
-        request.app.state.rag.stream(body), media_type="text/event-stream",
+        request.app.state.rag.stream(body, turn), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
 @router.get("/sessions/{session_id}/messages", response_model=MessageListResponse)
-async def messages(session_id: str, request: Request):
-    return ok(await request.app.state.repo.chat_history(session_id, 100))
+async def messages(session_id: str, request: Request, limit: int = Query(100, ge=1, le=100), before: str | None = None):
+    await request.app.state.repo.recover_chat(session_id)
+    return ok(await request.app.state.repo.chat_history(session_id, limit, before))
 
 
 @router.delete("/sessions/{session_id}/messages", response_model=DeletedResponse)
 async def clear_messages(session_id: str, request: Request):
     await request.app.state.repo.clear_chat_history(session_id)
     return ok({"deleted": True})
+
+
+@router.post("/sessions", status_code=201, response_model=SessionResponse)
+async def create_session(body: SessionCreate, request: Request):
+    await request.app.state.rag.validate_scope(body.knowledge_base_id, body.knowledge_ids)
+    if not body.title.strip():
+        raise AppError("invalid_title", "会话标题不能为空", 422)
+    return ok(await request.app.state.repo.create_session(body.knowledge_base_id, body.knowledge_ids, body.title.strip()))
+
+
+@router.get("/sessions", response_model=SessionListResponse)
+async def list_sessions(request: Request, knowledge_base_id: str | None = None, legacy: bool = False):
+    if not legacy:
+        await request.app.state.rag.validate_scope(knowledge_base_id, [])
+    sessions = await request.app.state.repo.list_sessions(knowledge_base_id, legacy)
+    for session in sessions:
+        if session["active_turn"]:
+            await request.app.state.repo.recover_chat(session["id"])
+    return ok(await request.app.state.repo.list_sessions(knowledge_base_id, legacy))
+
+
+@router.patch("/sessions/{session_id}", response_model=SessionResponse)
+async def rename_session(session_id: str, body: SessionUpdate, request: Request):
+    if not body.title.strip():
+        raise AppError("invalid_title", "会话标题不能为空", 422)
+    await request.app.state.repo.mutate_session(session_id, "rename", body.title.strip())
+    return ok(await request.app.state.repo.get_session(session_id))
+
+
+@router.delete("/sessions/{session_id}", response_model=DeletedResponse)
+async def delete_session(session_id: str, request: Request):
+    await request.app.state.repo.mutate_session(session_id, "delete")
+    return ok({"deleted": True})
+
+
+@router.post("/sessions/{session_id}/stop", response_model=StopResponse)
+async def stop_session(session_id: str, request: Request):
+    if not await request.app.state.repo.get_session(session_id):
+        raise AppError("session_not_found", "会话不存在", 404)
+    await request.app.state.repo.stop_chat(session_id)
+    return ok({"stopped": True})
