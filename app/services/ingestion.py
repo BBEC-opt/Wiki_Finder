@@ -19,6 +19,11 @@ class IngestionService:
     def __init__(self, repo: Repository, storage: LocalStorage, queue, settings):
         self.repo, self.storage, self.queue, self.settings = repo, storage, queue, settings
 
+    async def _cleanup_failed_creation(self, kb_id: str, knowledge_id: str) -> None:
+        discarded = await self.repo.discard_pending_knowledge(knowledge_id)
+        if discarded:
+            await self.storage.delete_knowledge(kb_id, knowledge_id)
+
     async def create_file(self, kb_id: str, upload) -> dict:
         kb = await self.repo.get_kb(kb_id)
         if not kb:
@@ -28,6 +33,7 @@ class IngestionService:
         final_dir.mkdir(parents=True, exist_ok=True)
         final_path = final_dir / filename
         digest, size = hashlib.sha256(), 0
+        created = False
         try:
             with final_path.open("wb") as handle:
                 while block := await upload.read(1024 * 1024):
@@ -45,6 +51,7 @@ class IngestionService:
             }
             try:
                 knowledge, task_id = await self.repo.create_knowledge_and_task(data, self.settings.worker_max_attempts)
+                created = True
             except Exception as exc:
                 if "UNIQUE constraint failed" in str(exc):
                     raise AppError("duplicate_document", "该文件已经存在", 409) from exc
@@ -53,7 +60,9 @@ class IngestionService:
             await self.queue.put(task_id)
             return knowledge
         except Exception:
-            if final_path.exists():
+            if created:
+                await self._cleanup_failed_creation(kb_id, knowledge_id)
+            elif final_path.exists():
                 final_path.unlink()
             raise
 
@@ -74,10 +83,19 @@ class IngestionService:
             "source_type": "manual", "file_name": filename, "file_path": str(path),
             "file_hash": None,
         }
-        knowledge, task_id = await self.repo.create_knowledge_and_task(data, self.settings.worker_max_attempts)
-        await self.storage.persist_source(kb_id, knowledge_id, path)
-        await self.queue.put(task_id)
-        return knowledge
+        created = False
+        try:
+            knowledge, task_id = await self.repo.create_knowledge_and_task(data, self.settings.worker_max_attempts)
+            created = True
+            await self.storage.persist_source(kb_id, knowledge_id, path)
+            await self.queue.put(task_id)
+            return knowledge
+        except Exception:
+            if created:
+                await self._cleanup_failed_creation(kb_id, knowledge_id)
+            else:
+                await self.storage.delete_knowledge(kb_id, knowledge_id)
+            raise
 
     async def reprocess(self, knowledge_id: str) -> dict:
         knowledge = await self.repo.get_knowledge(knowledge_id)
