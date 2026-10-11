@@ -67,6 +67,25 @@ class Repository:
         finally:
             await db.close()
 
+    async def discard_pending_knowledge(self, knowledge_id: str) -> bool:
+        """清理尚未被 Worker 领取的摄取记录，避免留下无源文件的排队任务。"""
+        db = await self.database.connect()
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                "DELETE FROM knowledges WHERE id=? AND parse_status='pending' "
+                "AND NOT EXISTS (SELECT 1 FROM chunks WHERE knowledge_id=?) "
+                "AND NOT EXISTS (SELECT 1 FROM ingestion_tasks WHERE knowledge_id=? AND status='running')",
+                (knowledge_id, knowledge_id, knowledge_id),
+            )
+            await db.commit()
+            return cursor.rowcount == 1
+        except Exception:
+            await db.rollback()
+            raise
+        finally:
+            await db.close()
+
     async def get_knowledge(self, knowledge_id: str) -> dict | None:
         return await self.query_one("SELECT * FROM knowledges WHERE id=?", (knowledge_id,))
 
@@ -732,7 +751,18 @@ class Repository:
     async def claim_outbox(self, limit: int) -> list[dict]:
         stamp = now_iso()
         rows = await self.query_all(
-            "SELECT * FROM outbox_events WHERE status IN ('pending','failed') AND available_at<=? ORDER BY created_at LIMIT ?",
+            """SELECT e.* FROM outbox_events e
+            WHERE e.status IN ('pending','failed') AND e.available_at<=?
+              AND NOT (e.event_type='vector.upsert' AND EXISTS (
+                SELECT 1 FROM outbox_events deletion
+                WHERE deletion.aggregate_type=e.aggregate_type
+                  AND deletion.aggregate_id=e.aggregate_id
+                  AND deletion.event_type='vector.delete_knowledge'
+                  AND deletion.status IN ('pending','failed','processing')
+              ))
+            ORDER BY e.created_at,
+              CASE e.event_type WHEN 'vector.delete_knowledge' THEN 0 ELSE 1 END,
+              e.id LIMIT ?""",
             (stamp, limit),
         )
         claimed = []
