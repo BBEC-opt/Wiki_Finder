@@ -32,6 +32,8 @@
             <button class="active" data-view="documents">资料</button>
             <button data-view="wiki">Wiki</button>
             <button data-view="ask">问答</button>
+            <button data-view="prompts">Prompt 管理</button>
+            <button data-view="prompts">Prompt 管理</button>
           </nav>
         </header>
       <section class="documents panel view-panel active" data-view-panel="documents">
@@ -92,6 +94,15 @@
             <small class="composer-hint">Enter 发送 · Shift + Enter 换行 · 回答请结合原始证据核对</small>
           </div>
         </div>
+      </section>
+      <section class="panel view-panel prompt-panel" data-view-panel="prompts">
+        <div class="panel-head"><div><small>CONTEXT LAYERS</small><h2>Prompt 管理</h2></div><button class="text-btn" id="reloadPromptsBtn">重新加载</button></div>
+        <p class="muted prompt-intro">编辑项目级任务指令。系统会在每次模型调用时读取最新内容；证据、文档片段和抽取密度仍由业务流程单独注入。</p>
+        <div class="prompt-layout"><nav id="promptList" class="prompt-list" aria-label="Prompt 列表"></nav><form id="promptForm" class="prompt-editor">
+          <h3 id="promptTitle">选择一个 Prompt</h3><p id="promptDescription" class="muted"></p>
+          <label for="promptContent">任务指令</label><textarea id="promptContent" rows="18" maxlength="20000" spellcheck="false" disabled></textarea>
+          <div class="panel-actions"><button type="submit" class="button dark" id="savePromptBtn" disabled>保存并立即生效</button><button type="button" class="text-btn" id="resetPromptBtn" disabled>恢复内置默认值</button><span id="promptState" class="muted" role="status" aria-live="polite"></span></div>
+        </form></div>
       </section>
       </section>
     </section>

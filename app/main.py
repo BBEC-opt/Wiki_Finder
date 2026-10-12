@@ -24,6 +24,7 @@ from app.services.ingestion import IngestionService, IngestionWorker
 from app.services.rag import RagService
 from app.services.retrieval import RetrievalService
 from app.services.outbox import OutboxDispatcher
+from app.services.prompts import PromptService
 
 
 @asynccontextmanager
@@ -48,11 +49,14 @@ async def lifespan(app: FastAPI):
     worker = IngestionWorker(repo, parser, embedding, queue, settings, storage=storage, chat_provider=chat)
     retrieval = RetrievalService(repo, embedding, settings, rerank_provider, vector_index)
     rag = RagService(repo, retrieval, chat, settings.max_context_chars)
+    prompts = PromptService(settings.database_path.parent / "prompts.json")
+    rag.prompts = prompts
+    worker.wiki.prompts = prompts
     worker.tracing = tracing
     retrieval.tracing = rag.tracing = tracing
     outbox = OutboxDispatcher(repo, vector_index)
     for key, value in locals().copy().items():
-        if key in {"settings", "repo", "storage", "parser", "ingestion", "worker", "retrieval", "rag", "outbox"}:
+        if key in {"settings", "repo", "storage", "parser", "ingestion", "worker", "retrieval", "rag", "outbox", "prompts"}:
             setattr(app.state, key, value)
     if settings.run_embedded_worker:
         await worker.start()

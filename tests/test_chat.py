@@ -16,6 +16,7 @@ from app.infrastructure.providers import ChatProvider, ExtractiveChatProvider
 from app.infrastructure.repository import Repository
 from app.main import create_app
 from app.services.rag import RagService
+from app.services.prompts import PromptService, MANDATORY_CONSTRAINTS
 
 
 @pytest.fixture
@@ -308,6 +309,26 @@ async def test_oversized_first_reference_is_bounded_and_escaped(service):
     prompt = captured[-1]["content"]
     assert len(prompt) < 1100
     assert "&lt;" in prompt and "内容<&>" not in prompt
+
+
+async def test_answer_uses_latest_custom_prompt_and_keeps_mandatory_constraints(service, tmp_path):
+    rag, _, request = service
+    prompts = PromptService(tmp_path / "prompts.json")
+    prompts.update("rag_answer", "自定义问答角色")
+    rag.prompts = prompts
+    captured = []
+
+    class Model(ChatProvider):
+        async def stream(self, messages):
+            captured.extend(messages)
+            yield "回答 [1]"
+
+    rag.chat = Model()
+    await collect(rag, request)
+
+    system_prompt = captured[0]["content"]
+    assert system_prompt.startswith("自定义问答角色")
+    assert MANDATORY_CONSTRAINTS["rag_answer"] in system_prompt
 
 
 async def test_deleted_source_keeps_saved_reference_snapshot(service):

@@ -12,6 +12,7 @@ from app.api.schemas import (
     KnowledgeListResponse, KnowledgeResponse, ManualKnowledgeCreate, MessageListResponse,
     ParserPreviewResponse, SearchRequest, SearchResponse, StageListResponse,
     WikiFolderCreate, WikiFolderListResponse, WikiPageListResponse, WikiPageResponse, WikiPageWrite,
+    PromptUpdate,
 )
 
 
@@ -30,6 +31,21 @@ router = APIRouter(
 
 def ok(data):
     return {"success": True, "data": data}
+
+
+@router.get("/prompts")
+async def list_prompts(request: Request):
+    return ok(request.app.state.prompts.list())
+
+
+@router.put("/prompts/{prompt_id}")
+async def update_prompt(prompt_id: str, body: PromptUpdate, request: Request):
+    return ok(request.app.state.prompts.update(prompt_id, body.content))
+
+
+@router.post("/prompts/{prompt_id}/reset")
+async def reset_prompt(prompt_id: str, request: Request):
+    return ok(request.app.state.prompts.reset(prompt_id))
 
 
 @router.get("/health/live", response_model=HealthResponse)

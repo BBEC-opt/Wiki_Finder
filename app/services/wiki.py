@@ -8,17 +8,14 @@ from uuid import uuid4
 
 from app.infrastructure.tracing import current_observation, traced
 from app.domain import ChunkDraft, ParsedDocument
+from app.services.prompts import DEFAULT_PROMPTS
 
 
 PAGE_MARKER = re.compile(r"<!--\s*page:(\d+)\s*-->")
 MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 HEADING = re.compile(r"^(#{1,3})\s+(.+?)\s*$", re.MULTILINE)
 
-CANDIDATE_SYSTEM = """你是知识库 Wiki 的候选条目编辑。只依据输入文档抽取被实质讨论、值得独立成页的实体与概念。
-输出严格 JSON，不要代码围栏或解释：{"candidates":[{"slug":"concept/example","title":"标题","page_type":"concept"}]}。
-slug 只能含小写字母、数字、斜杠、连字符；页面类型只能是 entity 或 concept。此阶段只建立候选骨架，不得输出引用。
-仅偶然提及、章节名过于宽泛、缺少可陈述事实的词语不得入选；同一对象的简称、全称和别名只保留一个。相关不等于同一条目，已有同义页面必须复用其 slug。
-granularity=focused 时只保留贯穿文档的核心对象；standard 保留有完整段落说明的对象；exhaustive 可保留局部但有充分说明的对象。"""
+CANDIDATE_SYSTEM = DEFAULT_PROMPTS["wiki_candidates"]
 
 CITATION_SYSTEM = """你负责为既有 Wiki 候选逐 Chunk 标注证据。只在 Chunk 对候选有实质性陈述时引用，名称偶然出现不算证据。
 输出严格 JSON：{"citations":{"concept/example":[0,2]}}。键只能来自候选 slug，值只能使用本批输入的 chunk index；没有证据时返回空数组。"""
@@ -175,7 +172,8 @@ class WikiGenerationService:
                 try:
                     compact = [{"index": c.chunk_index, "heading": c.heading_path, "content": c.content} for c in chunks[offset:offset + 8]]
                     prompt = f"<granularity>{self.extraction_granularity}</granularity>\n<existing>{json.dumps(known, ensure_ascii=False)}</existing>\n<chunks>{json.dumps(compact, ensure_ascii=False)}</chunks>"
-                    raw = await self.chat.complete([{"role": "system", "content": CANDIDATE_SYSTEM}, {"role": "user", "content": prompt}])
+                    candidate_system = self.prompts.get("wiki_candidates") if hasattr(self, "prompts") else CANDIDATE_SYSTEM
+                    raw = await self.chat.complete([{"role": "system", "content": candidate_system}, {"role": "user", "content": prompt}])
                     collected.extend(self._json(raw).get("candidates", []))
                 except Exception as exc:
                     current_observation().update(level="WARNING", status_message=type(exc).__name__, metadata={"fallback": "deterministic"})

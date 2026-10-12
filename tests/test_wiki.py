@@ -2,6 +2,7 @@ import json
 
 from app.domain import ChunkDraft, ParsedDocument
 from app.services.wiki import WikiGenerationService
+from app.services.prompts import MANDATORY_CONSTRAINTS, PromptService
 
 
 class FakeWikiChat:
@@ -46,6 +47,20 @@ async def test_model_wiki_pipeline_extracts_candidates_and_grounded_pages():
     assert meta["cited_chunks"] == 2
     assert meta["phases"][-1] == "finalize"
     assert len(chat.calls) == 4
+
+
+async def test_candidate_extraction_uses_custom_prompt_and_keeps_constraints(tmp_path):
+    chat = FakeWikiChat()
+    service = WikiGenerationService(chat, "openai")
+    service.prompts = PromptService(tmp_path / "prompts.json")
+    service.prompts.update("wiki_candidates", "只抽取明确说明的实体。")
+    chunks = [ChunkDraft(0, "实体有充分说明。", "章节", None)]
+
+    await service._candidates({"id": "doc-1", "title": "文档"}, chunks, [])
+
+    system_prompt = chat.calls[0][0]["content"]
+    assert system_prompt.startswith("只抽取明确说明的实体。")
+    assert MANDATORY_CONSTRAINTS["wiki_candidates"] in system_prompt
 
 
 async def test_invalid_model_protocol_falls_back_to_offline_generation():

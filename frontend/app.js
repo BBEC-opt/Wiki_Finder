@@ -1,7 +1,8 @@
 const API = (window.MY_WIKI_API_BASE || document.querySelector('meta[name="api-base"]')?.content || '/api/v1').replace(/\/$/, '');
 const requestedView = new URLSearchParams(location.search).get('view');
-const initialView = ['documents','wiki','ask'].includes(requestedView) ? requestedView : 'documents';
+const initialView = ['documents','wiki','ask','prompts'].includes(requestedView) ? requestedView : 'documents';
 const state = { bases: [], activeId: null, documents: [], wikiPages: [], wikiAllPages: [], activeWikiPage: null, progressDocumentId: null, wikiMode: 'reader', view: initialView, tab: 'file', sessionId: null, sessions: [], legacySessions: [], chatMessages: [], chatRun: null, chatEpoch: 0, chatLoading: false, hasOlder: false };
+let promptItems = [], activePromptId = null;
 
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value = '') => String(value).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
@@ -226,7 +227,46 @@ function switchView(view) {
   document.querySelectorAll('.view-tabs button').forEach(button=>button.classList.toggle('active',button.dataset.view===view));
   document.querySelectorAll('[data-view-panel]').forEach(panel=>panel.classList.toggle('active',panel.dataset.viewPanel===view));
   if(view==='wiki' && state.activeId) { loadWikiPages(); loadWikiProgress(); }
+  if(view==='prompts') loadPrompts();
 }
+
+async function loadPrompts(selectedId=activePromptId) {
+  const list=$('#promptList');
+  try {
+    promptItems=await request('/prompts');
+    if(!promptItems.some(item=>item.id===selectedId)) selectedId=promptItems[0]?.id;
+    activePromptId=selectedId||null;list.replaceChildren();
+    for(const item of promptItems) {
+      const button=document.createElement('button');button.type='button';button.className='prompt-choice'+(item.id===activePromptId?' active':'');
+      const title=document.createElement('strong'),status=document.createElement('small');title.textContent=item.name;status.textContent=item.is_custom?'项目覆盖':'内置默认';
+      button.append(title,status);button.onclick=()=>selectPrompt(item.id);list.append(button);
+    }
+    renderPromptEditor();
+  } catch(error) { list.textContent='Prompt 加载失败：'+error.message; }
+}
+
+function selectPrompt(id) { activePromptId=id; renderPromptEditor(); }
+
+function renderPromptEditor() {
+  const item=promptItems.find(prompt=>prompt.id===activePromptId), form=$('#promptForm');
+  $('#promptList').querySelectorAll('.prompt-choice').forEach((button,index)=>button.classList.toggle('active',promptItems[index]?.id===activePromptId));
+  $('#promptTitle').textContent=item?.name||'选择一个 Prompt';$('#promptDescription').textContent=item?.description||'';
+  $('#promptContent').value=item?.content||'';$('#promptContent').disabled=!item;
+  $('#savePromptBtn').disabled=!item;$('#resetPromptBtn').disabled=!item||!item.is_custom;
+  $('#promptState').textContent=item?.is_custom?'正在使用项目自定义版本':'正在使用内置默认版本';form.dataset.promptId=item?.id||'';
+}
+
+$('#reloadPromptsBtn').onclick=()=>loadPrompts();
+$('#promptForm').onsubmit=async event=>{
+  event.preventDefault();const id=event.currentTarget.dataset.promptId;if(!id)return;
+  try { await request('/prompts/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:$('#promptContent').value})});await loadPrompts(id);toast('Prompt 已保存，新请求立即生效'); }
+  catch(error){$('#promptState').textContent=error.message;toast('保存失败：'+error.message,true);}
+};
+$('#resetPromptBtn').onclick=async()=>{
+  if(!activePromptId)return;
+  try { await request('/prompts/'+activePromptId+'/reset',{method:'POST'});await loadPrompts(activePromptId);toast('已恢复内置默认 Prompt'); }
+  catch(error){toast('恢复失败：'+error.message,true);}
+};
 
 const PIPELINE_STEPS = [
   ['parsing','文档解析','读取版面、页码、表格与图片'],

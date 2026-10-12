@@ -26,6 +26,10 @@ class ManualKnowledgeCreate(BaseModel):
     content: str = Field(min_length=1, max_length=2_000_000)
 
 
+class PromptUpdate(BaseModel):
+    content: str = Field(min_length=1, max_length=20_000)
+
+
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=4_000)
     knowledge_base_ids: list[str] = Field(min_length=1)

@@ -79,6 +79,7 @@ SSE 依次发送 start、references、answer、done，生成失败发送 error�
 - SQLite 保存知识库、知识、任务、阶段、Chunk 和聊天记录。
 - SQLite 的 `wiki_pages` 保存知识库级页面，`wiki_page_sources` 保存证据，`wiki_folders` 保存目录；初始化时兼容迁移旧的单文档页面表。
 - `data/uploads/` 保存源文件，`data/artifacts/` 保存解析产物；均为运行时数据。
+- `data/prompts.json` 保存问答与 Wiki 候选抽取的项目级 Prompt 覆盖；缺失或无效时使用代码内置默认值。`PromptService` 在服务生命周期内管理覆盖，保存以原子替换文件完成，新请求立即使用新内容；每个模型调用开始后使用固定的消息快照。用户编辑任务指令，服务端始终追加不可编辑的数据边界与证据约束。恢复默认会移除对应覆盖项。
 - 无 API Key 时使用离线 Provider；配置 API Key 后使用 OpenAI-compatible 接口。默认真实模型示例采用阿里云百炼北京地域、`qwen-plus` 和 1024 维 `text-embedding-v4`。该模型同步接口单批最多 10 条，Provider 会将配置批大小自动收敛到模型上限，并显式传递 `dimensions`；错误响应保留服务端错误体但不记录请求头或密钥。
 - `WIKI_EXTRACTION_GRANULARITY` 控制 `focused / standard / exhaustive` 抽取密度，默认 `standard`；`WIKI_MAX_CANDIDATES` 限制单篇文档候选数，默认 12。
 - Embedding 模型或维度变化后，已有知识必须重新处理或新建知识库。
@@ -91,6 +92,7 @@ SSE 依次发送 start、references、answer、done，生成失败发送 error�
 - 输入在 Pydantic 模型或服务边界校验，文件下载必须限制在对应产物目录内。
 - Wiki 页面使用 `GET /knowledge-bases/{kb_id}/wiki/pages` 列出，支持 `knowledge_id` 与 `q` 过滤；知识库子资源提供页面 CRUD、slug 查询、来源和目录接口。旧的 `GET /wiki/pages/{page_id}` 暂时保留兼容。
 - `GET /knowledge-bases/{kb_id}/wiki/stats` 返回页面、链接和来源统计；`GET /knowledge-bases/{kb_id}/wiki/lint` 返回死链与无来源页面问题。
+- Prompt 管理：`GET /prompts` 列出可配置任务指令及默认值，`PUT /prompts/{prompt_id}` 保存项目覆盖，`POST /prompts/{prompt_id}/reset` 恢复该项内置值。首批支持 `rag_answer` 与 `wiki_candidates`；动态证据、Chunk、历史和抽取密度仍由服务端流程注入，不由模板变量控制。
 
 ## 设计决策
 
@@ -98,6 +100,7 @@ SSE 依次发送 start、references、answer、done，生成失败发送 error�
 - API、业务流程、基础设施按目录隔离，但不为每个类创建单独协议层。
 - Dense 检索采用 SQLite JSON 加进程内计算，适用于演示和小数据集；替换向量库时保持服务层调用边界稳定。
 - Wiki 生成是索引后的独立阶段；自动页面与人工页面共享知识库级命名空间，但采用不同覆盖策略。
+- Prompt 采用“内置默认 + 项目级覆盖 + 请求动态上下文”三层组合；先支持两类任务 Prompt，强制安全与证据约束由服务端追加，配置仅保存在运行期数据目录。
 
 ## Langfuse 可观测性
 
