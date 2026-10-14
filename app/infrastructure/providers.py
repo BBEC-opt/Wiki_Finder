@@ -115,6 +115,25 @@ class OpenAIChatProvider(ChatProvider):
         self.headers = {"Authorization": f"Bearer {api_key}"}
         self.model, self.timeout = model, timeout
 
+    async def tool_turn(self, messages: list[dict], tools: list[dict]) -> dict:
+        """执行一次 OpenAI-compatible 工具决策；文本流仍由 stream() 负责。"""
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.post(
+                self.url, headers=self.headers,
+                json={"model": self.model, "messages": messages, "tools": tools, "tool_choice": "auto"},
+            )
+            response.raise_for_status()
+        payload = response.json()
+        choices = payload.get("choices") or []
+        if not choices:
+            raise ValueError("模型未返回工具决策")
+        message = choices[0].get("message") or {}
+        return {
+            "content": message.get("content") or "",
+            "tool_calls": message.get("tool_calls") or [],
+            "finish_reason": choices[0].get("finish_reason"),
+        }
+
     @traced("model-chat", "generation")
     async def stream(self, messages: list[dict]) -> AsyncIterator[str]:
         observation = current_observation()

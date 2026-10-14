@@ -682,6 +682,7 @@ function renderChatMessage(message) {
   if(message.role==='assistant') {
     const actions=document.createElement('div');actions.className='message-actions';
     const status=document.createElement('span');status.textContent=({generating:'生成中',stopping:'正在停止',completed:'已完成',failed:'生成失败 · 已保留内容',stopped:'已停止 · 内容可能不完整'})[message.status]||'';actions.append(status);
+    if(message.toolStatus){const toolStatus=document.createElement('span');toolStatus.textContent=message.toolStatus;actions.append(toolStatus);}
     const copy=document.createElement('button');copy.className='text-btn';copy.textContent='复制';copy.disabled=!message.content;
     copy.onclick=async()=>{try{await navigator.clipboard.writeText(message.content);toast('已复制回答');}catch{toast('复制失败，请手动选择文本',true);}};actions.append(copy);
     if(['failed','stopped'].includes(message.status)&&message===state.chatMessages.at(-1)&&activeSession()?.knowledge_base_id) {
@@ -740,6 +741,7 @@ async function ask(question,retryId=null) {
       if(type==='start'){answer.id=data.message_id;answer.turn_id=data.turn_id;const user=state.chatMessages.at(-2);if(user?.role==='user')user.turn_id=data.turn_id;}
       if(type==='references')answer.references_json=JSON.stringify(data.references);
       if(type==='answer')answer.content+=data.delta;
+      if(type==='tool')answer.toolStatus=data.status==='running'?'正在检索知识库…':data.status==='failed'?'检索失败，正在回退…':`检索完成 · ${data.count||0} 条资料`;
       if(type==='done'||type==='error'){terminal=true;answer.status=data.status||(type==='error'?'failed':'completed');if(type==='error')toast(data.message,true);}
     };
     while(true){const {value,done}=await reader.read();if(epoch!==state.chatEpoch){await reader.cancel();return;}

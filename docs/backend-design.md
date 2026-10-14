@@ -68,11 +68,11 @@ Wiki 与解析预览分离。`parsed.md` 是忠实保留页码、表格和图片
 
 Reranker 通过 `app/infrastructure/rerank_provider.py` 管理，支持离线与本地模型两种模式，模型加载失败自动回退到离线实现。MMR 集成在 `RetrievalService._apply_mmr`，使用 jieba 分词和 Jaccard 相似度。配置项包括 `RERANK_ENABLED`、`RERANK_MODEL`、`RERANK_THRESHOLD`、`RRF_K`、`VECTOR_WEIGHT`、`KEYWORD_WEIGHT`、`MMR_ENABLED`、`MMR_LAMBDA`。
 
-RagService 先校验并固定会话的知识库及资料范围，再从已完成轮次选取最多三轮历史。真实模型把追问改写成独立检索问题，15 秒超时或失败时回退原问题；离线模式仅拼接最近问题作为检索上下文，不承诺模型级指代理解。继续复用现有 RetrievalService，不变更向量模型或索引。
+RagService 先校验并固定会话的知识库及资料范围，再从已完成轮次选取最多三轮历史。OpenAI-compatible 聊天 Provider 增加非流式工具决策调用；真实模型可在最多三轮内选择只读 `search_knowledge` 工具，工具的知识库和资料范围始终由已校验的会话提供，模型只能给出检索文本。工具结果以有界 JSON 回传，最终回答仍走原有流式 RAG 提示词、证据预算与引用流程。工具协议不受支持或决策调用失败时回退现有自动检索；离线 Provider 保持原行为。真实模型把追问改写成独立检索问题（自动检索回退路径），15 秒超时或失败时回退原问题；离线模式仅拼接最近问题作为检索上下文，不承诺模型级指代理解。继续复用现有 RetrievalService，不变更向量模型或索引。
 
 历史使用不超过 max_context_chars 的三分之一（最多 4000 字符），按完整轮次选取；证据使用扣除历史与当前问题后的剩余预算，首条超长证据也裁剪，序号重新从 1 编排。资料以转义后的 XML 数据块传给模型，不执行资料中的指令；无证据时使用确定性资料不足回答，不调用远端生成模型。
 
-SSE 依次发送 start、references、answer、done，生成失败发送 error。start 携带 session_id、turn_id、message_id、request_id；answer 保留 delta；done 增加 status（completed/stopped），error 使用固定提示和 answer_failed 错误码，不回显内部异常。每 15 秒发送心跳注释。消息 ID 在生成前分配，不随重试变化。
+SSE 发送 start、可选 tool、references、answer、done，生成失败发送 error。tool 事件报告 `search_knowledge` 的 running/completed 状态和命中数，前端显示简短进度；旧客户端可忽略此新增事件。start 携带 session_id、turn_id、message_id、request_id；answer 保留 delta；done 增加 status（completed/stopped），error 使用固定提示和 answer_failed 错误码，不回显内部异常。每 15 秒发送心跳注释。消息 ID 在生成前分配，不随重试变化。工具调用过程不单独持久化，持久化内容仍为用户与最终助手消息；无 Schema 迁移。
 
 ## 存储与配置
 
