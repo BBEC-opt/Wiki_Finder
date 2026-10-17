@@ -3,6 +3,8 @@ const requestedView = new URLSearchParams(location.search).get('view');
 const initialView = ['documents','wiki','ask','prompts'].includes(requestedView) ? requestedView : 'documents';
 const state = { bases: [], activeId: null, documents: [], wikiPages: [], wikiAllPages: [], activeWikiPage: null, progressDocumentId: null, wikiMode: 'reader', view: initialView, tab: 'file', sessionId: null, sessions: [], legacySessions: [], chatMessages: [], chatRun: null, chatEpoch: 0, chatLoading: false, hasOlder: false };
 let promptItems = [], activePromptId = null;
+let wikiListRequest = 0, wikiProgressRequest = 0, wikiPageRequest = 0;
+let wikiListLoaded = false;
 
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value = '') => String(value).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
@@ -130,6 +132,19 @@ function renderBases() {
 
 async function selectBase(id) {
   if (state.activeId !== id) { detachChat(); state.sessions=[]; state.legacySessions=[]; renderSessions(); renderChat(); }
+  if (state.activeId !== id) {
+    ++wikiListRequest; ++wikiProgressRequest; ++wikiPageRequest;
+    clearTimeout(wikiSearchTimer);
+    state.wikiPages=[]; state.wikiAllPages=[]; state.activeWikiPage=null;
+    wikiListLoaded=false; $('#wikiSearch').value='';
+    $('#wikiPageList').innerHTML='';
+    $('#wikiPageList').setAttribute('aria-busy','false');
+    $('#wikiGraph').innerHTML='';
+    $('#wikiPipeline').innerHTML='';
+    $('#wikiArticle').innerHTML='<p class="muted">请选择 Wiki 页面。</p>';
+    $('#wikiEvidence').innerHTML='';
+    state.documents=[];
+  }
   state.activeId=id; state.progressDocumentId=null; renderBases();
   const base=state.bases.find(x=>x.id===id); $('#activeKbName').textContent=base?.name || '知识库';
   $('#workspaceTitle').textContent=base?.name || '知识库';
@@ -137,7 +152,7 @@ async function selectBase(id) {
   await loadDocuments();
   if (state.activeId !== id) return;
   await loadSessions(true);
-  if(state.view==='wiki') loadWikiProgress();
+  if(state.view==='wiki') { loadWikiPages(); loadWikiProgress(); }
 }
 
 async function loadDocuments() {
@@ -293,6 +308,7 @@ const compactMetric = value => {
 };
 
 async function loadWikiProgress() {
+  const requestId=++wikiProgressRequest, kbId=state.activeId;
   const root=$('#wikiPipeline');
   if(!state.activeId || !state.documents.length){
     root.innerHTML='<div class="pipeline-empty"><span>PROCESS MAP</span><p>添加资料后，这里会显示 Wiki 构建全过程。</p></div>';
@@ -309,8 +325,10 @@ async function loadWikiProgress() {
     ]);
     const build=builds[0];
     const detail=build ? await request(`/wiki/builds/${build.id}`) : null;
+    if(requestId!==wikiProgressRequest || kbId!==state.activeId || document.id!==state.progressDocumentId)return;
     renderWikiProgress(document,stages,detail);
   } catch(error) {
+    if(requestId!==wikiProgressRequest || kbId!==state.activeId || document.id!==state.progressDocumentId)return;
     root.innerHTML=`<div class="pipeline-empty error"><span>PIPELINE ERROR</span><p>${escapeHtml(error.message)}</p></div>`;
   }
 }
@@ -361,10 +379,16 @@ function renderWikiProgress(document,stages,build) {
   });
 }
 
-async function loadWikiPages(query='') {
-  const root=$('#wikiPageList'); root.innerHTML='<p class="muted">正在整理目录…</p>';
+async function loadWikiPages(query=$('#wikiSearch').value.trim()) {
+  const requestId=++wikiListRequest, kbId=state.activeId;
+  if(!kbId)return;
+  const root=$('#wikiPageList');
+  if(!wikiListLoaded)root.innerHTML='<p class="muted">正在整理目录…</p>';
+  root.setAttribute('aria-busy','true');
   try {
-    state.wikiPages=await request(`/knowledge-bases/${state.activeId}/wiki/pages${query?`?q=${encodeURIComponent(query)}`:''}`);
+    const pages=await request(`/knowledge-bases/${kbId}/wiki/pages${query?`?q=${encodeURIComponent(query)}`:''}`);
+    if(requestId!==wikiListRequest || kbId!==state.activeId)return;
+    state.wikiPages=pages; wikiListLoaded=true;
     if(!query) state.wikiAllPages=state.wikiPages;
     const groups={index:'索引',entity:'实体',concept:'概念',topic:'主题',summary:'文档概览',source:'原文'};
     root.innerHTML='';
@@ -377,7 +401,13 @@ async function loadWikiPages(query='') {
     }
     if(!root.children.length) root.innerHTML='<p class="muted">没有匹配的 Wiki 页面。</p>';
     if(state.wikiMode==='graph' && !query) renderWikiGraph();
-  } catch(error){ root.innerHTML=`<p class="muted">${escapeHtml(error.message)}</p>`; }
+  } catch(error){
+    if(requestId!==wikiListRequest || kbId!==state.activeId)return;
+    if(wikiListLoaded)toast('目录刷新失败：'+error.message,true);
+    else root.innerHTML=`<p class="muted">${escapeHtml(error.message)}</p>`;
+  } finally {
+    if(requestId===wikiListRequest)root.setAttribute('aria-busy','false');
+  }
 }
 
 function setWikiMode(mode) {
@@ -385,6 +415,8 @@ function setWikiMode(mode) {
   document.querySelectorAll('[data-wiki-mode]').forEach(button=>button.classList.toggle('active',button.dataset.wikiMode===mode));
   $('#wikiArticle').hidden=mode==='graph'; $('#wikiEvidence').hidden=mode==='graph'; $('#wikiGraph').hidden=mode!=='graph';
   if(mode==='graph') {
+    clearTimeout(wikiSearchTimer); ++wikiListRequest;
+    $('#wikiPageList').setAttribute('aria-busy','false');
     $('#wikiSearch').value='';
     if(state.wikiAllPages.length) renderWikiGraph(); else loadWikiPages();
   }
@@ -446,6 +478,7 @@ function renderWikiGraph() {
 }
 
 async function showWikiPage(page) {
+  const requestId=++wikiPageRequest, kbId=state.activeId;
   if(state.wikiMode!=='reader') setWikiMode('reader');
   state.activeWikiPage=page;
   document.querySelectorAll('.wiki-directory button').forEach(button=>button.classList.toggle('active',button.dataset.pageId===page.id));
@@ -462,11 +495,12 @@ async function showWikiPage(page) {
       request(`/knowledge-bases/${state.activeId}/wiki/pages/${page.id}/sources`),
       request(`/knowledge-bases/${state.activeId}/wiki/pages/${page.id}/backlinks`),
     ]);
+    if(requestId!==wikiPageRequest || kbId!==state.activeId || state.activeWikiPage?.id!==page.id)return;
     evidence.innerHTML='<small>SOURCES</small><h3>证据与链接</h3>';
     if(!sources.length) evidence.insertAdjacentHTML('beforeend','<p class="muted">这是人工页面，尚未绑定来源。</p>');
     sources.forEach(source=>{ const card=document.createElement('button'); card.className='source-card'; card.innerHTML=`<strong>${escapeHtml(source.knowledge_title)}</strong><span>${source.page_number?`第 ${source.page_number} 页 · `:''}${escapeHtml(source.heading_path||'文档证据')}</span><p>${escapeHtml(source.excerpt||'')}</p>`; card.onclick=()=>viewChunks(source.knowledge_id); evidence.append(card); });
     if(backlinks.length){ evidence.insertAdjacentHTML('beforeend','<small class="backlink-label">BACKLINKS</small>'); backlinks.forEach(link=>{ const button=document.createElement('button'); button.className='source-card'; button.innerHTML=`<strong>← ${escapeHtml(link.title)}</strong><span>${escapeHtml(link.slug)}</span>`; button.onclick=()=>openWikiSlug(link.slug); evidence.append(button); }); }
-  } catch(error){ evidence.insertAdjacentHTML('beforeend',`<p class="muted">${escapeHtml(error.message)}</p>`); }
+  } catch(error){ if(requestId!==wikiPageRequest || kbId!==state.activeId)return; evidence.insertAdjacentHTML('beforeend',`<p class="muted">${escapeHtml(error.message)}</p>`); }
 }
 
 async function showWikiBuildStatus(knowledgeId,head) {
@@ -482,14 +516,21 @@ async function showWikiBuildStatus(knowledgeId,head) {
 }
 
 async function openWikiSlug(slug) {
-  try { showWikiPage(await request(`/knowledge-bases/${state.activeId}/wiki/pages/by-slug/${encodeURIComponent(slug)}`)); }
-  catch(error){ toast(error.message,true); }
+  const requestId=++wikiPageRequest, kbId=state.activeId;
+  try {
+    const page=await request(`/knowledge-bases/${kbId}/wiki/pages/by-slug/${encodeURIComponent(slug)}`);
+    if(requestId===wikiPageRequest && kbId===state.activeId)showWikiPage(page);
+  } catch(error){ if(requestId===wikiPageRequest && kbId===state.activeId)toast(error.message,true); }
 }
 
 async function openWikiForDocument(documentId) {
   switchView('wiki');
-  const pages=await request(`/knowledge-bases/${state.activeId}/wiki/pages?knowledge_id=${encodeURIComponent(documentId)}`);
-  if(pages.length) showWikiPage(pages[0]); else toast('这份资料尚未生成关联页面',true);
+  const requestId=++wikiPageRequest, kbId=state.activeId;
+  try {
+    const pages=await request(`/knowledge-bases/${kbId}/wiki/pages?knowledge_id=${encodeURIComponent(documentId)}`);
+    if(requestId!==wikiPageRequest || kbId!==state.activeId)return;
+    if(pages.length) showWikiPage(pages[0]); else toast('这份资料尚未生成关联页面',true);
+  } catch(error){ if(requestId===wikiPageRequest && kbId===state.activeId)toast(error.message,true); }
 }
 
 function openWikiEditor(page=null) {
@@ -793,7 +834,7 @@ $('#olderMessagesBtn').onclick=()=>loadChatHistory(true);
 document.querySelectorAll('.view-tabs button').forEach(button=>button.onclick=()=>switchView(button.dataset.view));
 $('#newWikiPageBtn').onclick=()=>openWikiEditor();
 document.querySelectorAll('[data-wiki-mode]').forEach(button=>button.onclick=()=>setWikiMode(button.dataset.wikiMode));
-let wikiSearchTimer; $('#wikiSearch').oninput=event=>{ clearTimeout(wikiSearchTimer); wikiSearchTimer=setTimeout(()=>loadWikiPages(event.target.value.trim()),250); };
+let wikiSearchTimer; $('#wikiSearch').oninput=event=>{ clearTimeout(wikiSearchTimer); ++wikiListRequest; const query=event.target.value.trim(); wikiSearchTimer=setTimeout(()=>loadWikiPages(query),250); };
 document.querySelectorAll('[data-close-dialog]').forEach(button=>button.onclick=()=>button.closest('dialog').close());
 document.querySelectorAll('.tab').forEach(tab=>tab.onclick=()=>{ state.tab=tab.dataset.tab; document.querySelectorAll('.tab,.tab-content').forEach(x=>x.classList.remove('active')); tab.classList.add('active'); $(`#${state.tab}Tab`).classList.add('active'); });
 
@@ -825,9 +866,19 @@ $('#wikiEditorForm').onsubmit=async event=>{ event.preventDefault(); const form=
 $('#chatForm').onsubmit=event=>{ event.preventDefault(); const input=$('#question'), question=input.value.trim(); if(!question||!state.activeId||state.chatRun||state.chatLoading)return; ask(question); };
 $('#question').onkeydown=event=>{ if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){ event.preventDefault(); $('#chatForm').requestSubmit(); } };
 
-switchView(initialView); checkHealth(); loadBases(); setInterval(async()=>{
-  if(state.activeId && state.documents.some(x=>['pending','processing'].includes(x.parse_status))) {
+let refreshInFlight = false;
+async function refreshWorkspace(force=false) {
+  if(document.hidden || refreshInFlight || !state.activeId)return;
+  if(!force && !state.documents.some(x=>['pending','processing'].includes(x.parse_status)))return;
+  refreshInFlight=true;
+  const kbId=state.activeId;
+  try {
     await loadDocuments();
-    if(state.view==='wiki') { loadWikiProgress(); loadWikiPages(); }
-  }
-},2500);
+    if(kbId===state.activeId && !document.hidden && state.view==='wiki') {
+      await Promise.all([loadWikiProgress(),loadWikiPages()]);
+    }
+  } finally { refreshInFlight=false; }
+}
+document.addEventListener('visibilitychange',()=>{ if(!document.hidden)refreshWorkspace(true); });
+switchView(initialView); checkHealth(); loadBases();
+setInterval(()=>refreshWorkspace(),2500);

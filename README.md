@@ -29,7 +29,7 @@ uvicorn app.main:app --reload
 ```
 
 访问 Web 工作台：<http://127.0.0.1:8000/>  
-访问 Swagger：<http://127.0.0.1:8000/docs>。如果使用 `scripts/start.ps1`，脚本默认端口为 `8001`。
+访问 Swagger：<http://127.0.0.1:8000/docs>。如果使用 `scripts/start.ps1`，脚本默认端口为 `8001`，终端日志追加至 `data/logs/server.log`，端口状态保存在 `data/run/server.port`。
 
 默认是完全离线模式，不需要 API Key。
 
@@ -190,6 +190,12 @@ python -X pycache_prefix=data/cache/python -m pytest -q
 ```
 
 测试默认使用离线 Provider，不访问网络、不消耗 Token。
+
+前端异步交互回归测试使用 Node.js 内置测试运行器（无需安装 npm 依赖）：
+
+```powershell
+node --test tests/test_frontend.cjs
+```
 
 ## Demo 边界
 

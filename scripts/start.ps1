@@ -11,9 +11,10 @@ $VirtualEnv = Join-Path $ProjectRoot ".venv"
 $Python = Join-Path $VirtualEnv "Scripts\python.exe"
 $RuntimeRoot = Join-Path $ProjectRoot "data"
 $CacheRoot = Join-Path $RuntimeRoot "cache"
+$LogRoot = Join-Path $RuntimeRoot "logs"
 $PortFile = Join-Path $RuntimeRoot "run\server.port"
 
-New-Item -ItemType Directory -Force -Path $CacheRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $CacheRoot, $LogRoot | Out-Null
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PortFile) | Out-Null
 $env:PYTHONPYCACHEPREFIX = Join-Path $CacheRoot "python"
 
@@ -71,9 +72,15 @@ if (-not $NoReload) {
 
 Write-Host "Starting My Wiki at http://${HostAddress}:$Port"
 Set-Content -Path $PortFile -Value $Port -Encoding ASCII
-& $Python @UvicornArgs
-$ServerExitCode = $LASTEXITCODE
-Remove-Item -LiteralPath $PortFile -Force -ErrorAction SilentlyContinue
+$LogFile = Join-Path $LogRoot "server.log"
+Start-Transcript -Path $LogFile -Append | Out-Null
+try {
+    & $Python @UvicornArgs
+    $ServerExitCode = $LASTEXITCODE
+} finally {
+    Stop-Transcript | Out-Null
+    Remove-Item -LiteralPath $PortFile -Force -ErrorAction SilentlyContinue
+}
 if ($ServerExitCode -ne 0) {
     throw "The server exited with code $ServerExitCode."
 }

@@ -2,7 +2,7 @@
 
 ## 目标与边界
 
-后端提供本地优先的文档摄取、解析、切分、混合检索和流式问答能力。设计借鉴 WeKnora 的核心链路，但保持单进程 FastAPI、SQLite 和本地文件存储，不依赖参考仓库。
+后端提供本地优先的文档摄取、解析、切分、混合检索和流式问答能力。设计借鉴 WeKnora 的核心链路，默认采用 FastAPI、SQLite、本地文件存储与进程内 Worker，不依赖参考仓库；可选部署支持 PostgreSQL、MinIO、Qdrant 和 Redis 通知及独立 Worker。
 
 ## 模块职责
 
@@ -83,6 +83,21 @@ SSE 发送 start、可选 tool、references、answer、done，生成失败发送
 - 无 API Key 时使用离线 Provider；配置 API Key 后使用 OpenAI-compatible 接口。默认真实模型示例采用阿里云百炼北京地域、`qwen-plus` 和 1024 维 `text-embedding-v4`。该模型同步接口单批最多 10 条，Provider 会将配置批大小自动收敛到模型上限，并显式传递 `dimensions`；错误响应保留服务端错误体但不记录请求头或密钥。
 - `WIKI_EXTRACTION_GRANULARITY` 控制 `focused / standard / exhaustive` 抽取密度，默认 `standard`；`WIKI_MAX_CANDIDATES` 限制单篇文档候选数，默认 12。
 - Embedding 模型或维度变化后，已有知识必须重新处理或新建知识库。
+
+### 可选部署模式
+
+安装 `.[production]` 后可通过配置选择现有适配器，默认离线部署不需要外部服务。
+
+| 能力 | 默认 | 可选配置与职责 |
+|---|---|---|
+| 数据库 | SQLite（`DATABASE_PATH`） | `DATABASE_URL` 选择 PostgreSQL，连接池由 `DATABASE_POOL_MIN_SIZE/MAX_SIZE` 控制 |
+| 文件存储 | 本地上传与产物目录 | `OBJECT_STORAGE_DRIVER=minio` 与 `MINIO_*`；本地目录仍作为解析缓存 |
+| Dense 索引 | 数据库存向量、进程内计算 | `VECTOR_INDEX_DRIVER=qdrant` 与 `QDRANT_*`；数据库 Outbox 异步投影到可重建索引，失败记录并重试 |
+| 任务通知 | 进程内队列 | `TASK_NOTIFIER_DRIVER=redis` 与 `REDIS_URL/PREFIX`；任务所有权、租约及最终状态仍在数据库 |
+| Worker | Web 进程内启动 | `RUN_EMBEDDED_WORKER=false` 配合 Redis，由独立 Worker 消费任务 |
+
+- 切换存储不会自动迁移数据：需迁移数据库、对象文件并重建外部索引。数据库迁移入口为 `scripts/migrate_sqlite_to_postgres.py`；适配器切换本身不改变向量维度。
+- 启动脚本终端日志追加至 `data/logs/server.log`，端口状态保存在 `data/run/server.port`，Python 缓存在 `data/cache/python`。
 
 ## API 与错误约定
 
