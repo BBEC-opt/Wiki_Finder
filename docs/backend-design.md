@@ -74,6 +74,14 @@ RagService 先校验并固定会话的知识库及资料范围，再从已完成
 
 SSE 发送 start、可选 tool、references、answer、done，生成失败发送 error。tool 事件报告 `search_knowledge` 的 running/completed 状态和命中数，前端显示简短进度；旧客户端可忽略此新增事件。start 携带 session_id、turn_id、message_id、request_id；answer 保留 delta；done 增加 status（completed/stopped），error 使用固定提示和 answer_failed 错误码，不回显内部异常。每 15 秒发送心跳注释。消息 ID 在生成前分配，不随重试变化。工具调用过程不单独持久化，持久化内容仍为用户与最终助手消息；无 Schema 迁移。
 
+### 查询向量缓存
+
+- `RetrievalService` 在工具检索和自动检索共用入口缓存实际检索文本的 Embedding；精确匹配，不做文本归一化。只复用向量，每次仍按请求范围执行实时检索、重排和生成。
+- 每个服务实例维护独立内存 LRU，`QUERY_EMBEDDING_CACHE_SIZE` 默认 256，设为 0 关闭；`QUERY_EMBEDDING_CACHE_TTL_SECONDS` 默认 600，必须大于 0。TTL 从向量写入开始，使用单调时钟，命中不续期；访问时清理过期项。缓存向量保存为不可变快照，读取返回副本。
+- 缓存绑定生命周期内固定的 Embedding Provider；更换模型、维度或提供方配置须重建服务实例。知识库内容变更无需清理查询向量。多进程独立缓存，重启清空，不落盘、不引入外部依赖。
+- 失败、取消及无效向量不缓存，保持原有异常传播；允许并发相同未命中请求分别计算，不共享上游任务或取消状态。
+- API、SSE 和持久化结构不变，无需迁移或重新入库。此缓存只节省重复查询的 Embedding 开销，不缓存检索结果或最终回答。
+
 ## 存储与配置
 
 - SQLite 保存知识库、知识、任务、阶段、Chunk 和聊天记录。

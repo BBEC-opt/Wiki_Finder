@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     chunk_overlap: int = Field(100, ge=0)
     parent_chunk_size: int = Field(3_200, ge=200)
     embedding_batch_size: int = Field(10, ge=1, le=256)
+    query_embedding_cache_size: int = Field(256, ge=0)
+    query_embedding_cache_ttl_seconds: int = Field(600, ge=1)
     default_top_k: int = Field(5, ge=1, le=20)
     max_context_chars: int = Field(12_000, ge=1_000)
     worker_max_attempts: int = Field(3, ge=1, le=10)

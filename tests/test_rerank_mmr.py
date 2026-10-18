@@ -187,6 +187,8 @@ async def test_end_to_end_retrieval():
     from app.services.retrieval import RetrievalService
 
     class MockConfig:
+        query_embedding_cache_size = 256
+        query_embedding_cache_ttl_seconds = 600
         rrf_k = 60
         vector_weight = 1.0
         keyword_weight = 1.0

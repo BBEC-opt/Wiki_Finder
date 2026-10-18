@@ -1,7 +1,8 @@
 import json
 import math
 import re
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
+from time import monotonic
 
 import jieba
 
@@ -59,6 +60,7 @@ class RetrievalService:
         self.config = config
         self.rerank_provider = rerank_provider
         self.vector_index = vector_index
+        self._query_vectors: OrderedDict[str, tuple[float, tuple[float, ...]]] = OrderedDict()
 
     @traced("hybrid-search", "retriever")
     async def search(self, query: str, kb_ids: list[str], knowledge_ids: list[str] | None,
@@ -68,7 +70,7 @@ class RetrievalService:
         observation.content(input=query)
 
         # 1. 向量检索
-        query_vector = (await self.embedding.embed([query]))[0]
+        query_vector = await self._query_vector(query)
         dense = []
         if self.vector_index is None:
             candidates = await self.repo.candidate_chunks(kb_ids, knowledge_ids)
@@ -147,6 +149,33 @@ class RetrievalService:
         observation.update(output=output_meta)
         observation.content(output=result)
         return result
+
+    async def _query_vector(self, query: str) -> list[float]:
+        capacity = self.config.query_embedding_cache_size
+        if capacity == 0:
+            return (await self.embedding.embed([query]))[0]
+
+        now = monotonic()
+        # 命中不延长 TTL；清理所有过期项，避免占用有效条目的容量。
+        for key, (expires_at, _) in list(self._query_vectors.items()):
+            if expires_at <= now:
+                del self._query_vectors[key]
+        cached = self._query_vectors.get(query)
+        if cached is not None:
+            self._query_vectors.move_to_end(query)
+            return list(cached[1])
+
+        vector = (await self.embedding.embed([query]))[0]
+        # 失败或取消不会走到写入；不缓存无效或维度错误的向量。
+        if (vector and len(vector) == getattr(self.embedding, "dimension", len(vector))
+                and all(math.isfinite(value) for value in vector) and any(vector)):
+            self._query_vectors[query] = (
+                monotonic() + self.config.query_embedding_cache_ttl_seconds, tuple(vector),
+            )
+            self._query_vectors.move_to_end(query)
+            while len(self._query_vectors) > capacity:
+                self._query_vectors.popitem(last=False)
+        return vector
 
     async def _apply_rerank(self, query: str, candidates: list[dict]) -> tuple[list[dict], int]:
         """应用 Reranker 模型重排序。"""
