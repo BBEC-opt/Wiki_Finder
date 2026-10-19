@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 from pathlib import Path
 from uuid import uuid4
 
@@ -133,6 +134,7 @@ class IngestionWorker:
         self.stopping = False
 
     async def start(self) -> None:
+        self.stopping = False
         for task_id in await self.repo.recover_tasks(self.settings.task_lease_seconds):
             await self.queue.put(task_id)
         self.runner = asyncio.create_task(self.run(), name="ingestion-worker")
@@ -148,17 +150,54 @@ class IngestionWorker:
 
     async def run(self) -> None:
         while not self.stopping:
-            task_id = await self.queue.get()
+            try:
+                task_id = await asyncio.wait_for(self.queue.get(), timeout=self._lease_interval)
+            except TimeoutError:
+                try:
+                    for task_id in await self.repo.recover_tasks(self.settings.task_lease_seconds):
+                        await self.queue.put(task_id)
+                except Exception:
+                    logging.getLogger(__name__).warning("摄取任务恢复失败，将在下一轮重试")
+                continue
             try:
                 await self.process(task_id)
+            except Exception:
+                # 保留数据库任务，租约到期后恢复；单次异常不能终止整个消费者。
+                logging.getLogger(__name__).warning("摄取任务执行中断，将在租约到期后恢复")
             finally:
                 await self.queue.task_done()
+
+    @property
+    def _lease_interval(self) -> float:
+        return min(30, self.settings.task_lease_seconds / 3)
+
+    async def _renew_lease(self, task: dict) -> None:
+        while True:
+            await asyncio.sleep(self._lease_interval)
+            # 取消时等待在途数据库操作关闭连接，避免留下后台连接线程。
+            renewal = asyncio.create_task(self.repo.renew_task_lease(task["id"], task["attempts"]))
+            try:
+                renewed = await asyncio.shield(renewal)
+            finally:
+                await renewal
+            if not renewed:
+                raise RuntimeError("摄取任务租约已失效")
 
     @traced("document-ingestion")
     async def process(self, task_id: str) -> None:
         task = await self.repo.claim_task(task_id)
         if not task:
             return
+        async with asyncio.TaskGroup() as group:
+            heartbeat = group.create_task(self._renew_lease(task))
+            processing = group.create_task(self._process_claimed(task))
+            try:
+                await processing
+            finally:
+                heartbeat.cancel()
+
+    async def _process_claimed(self, task: dict) -> None:
+        task_id = task["id"]
         knowledge = await self.repo.get_knowledge(task["knowledge_id"])
         if not knowledge:
             return
@@ -259,10 +298,8 @@ class IngestionWorker:
             if current_stage:
                 await self.repo.finish_stage(current_stage, error=(code, str(exc)))
             retryable = getattr(exc, "retryable", False) or not isinstance(exc, (AppError, ValueError))
-            retry = await self.repo.task_failed(task, str(exc), retryable)
-            if retry:
-                await asyncio.sleep(min(30, 2 ** task["attempts"]))
-                await self.queue.put(task_id)
+            await self.repo.task_failed(task, str(exc), retryable)
+            # 到期的重试由空闲扫描重新入队，避免退避期间占用消费者。
 
     @staticmethod
     def _embedding_text(title: str, heading: str, content: str) -> str:

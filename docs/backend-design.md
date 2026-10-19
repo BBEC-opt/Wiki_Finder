@@ -28,7 +28,7 @@ app/domain.py           解析过程使用的领域数据对象
 4. `ParsingService` 输出 `parsed.md`、`manifest.json` 与可选图片。
 5. `Repository` 原子替换 Chunk 与 FTS 索引，再把生成结果合并到知识库级 `wiki_pages` 并刷新来源关系。
 
-任务状态为 `queued → running → succeeded/failed`；知识状态为 `pending → processing → completed/failed`。处理阶段依次为 `parsing → chunking → embedding → indexing → wiki_generation`，Wiki 成功写入后知识才进入 `completed`。进程启动时恢复排队任务和租约超时任务。
+任务状态为 `queued → running → succeeded/failed`；知识状态为 `pending → processing → completed/failed`。处理阶段依次为 `parsing → chunking → embedding → indexing → wiki_generation`，Wiki 成功写入后知识才进入 `completed`。进程启动时恢复已到期的排队任务和租约超时任务；队列空闲等待每 `min(30, TASK_LEASE_SECONDS / 3)` 秒再次扫描，覆盖启动时尚未超时以及退避期间重启的任务。执行中的任务按同一间隔更新 `updated_at` 续租，恢复以最后续租时间而非开始时间为准；续租按任务 ID 和尝试次数校验所有权，失效时取消当前执行。领取任务同时校验 `available_at`，重复通知不能绕过重试退避。取消 Worker 时同步结束执行与续租，未完成任务在租约到期后自动恢复。复用现有字段，无 Schema、API 或向量兼容性变化。
 
 ### Wiki 生成
 
@@ -86,8 +86,8 @@ SSE 发送 start、可选 tool、references、answer、done，生成失败发送
 
 - SQLite 保存知识库、知识、任务、阶段、Chunk 和聊天记录。
 - SQLite 的 `wiki_pages` 保存知识库级页面，`wiki_page_sources` 保存证据，`wiki_folders` 保存目录；初始化时兼容迁移旧的单文档页面表。
-- `data/uploads/` 保存源文件，`data/artifacts/` 保存解析产物；均为运行时数据。
-- `data/prompts.json` 保存问答与 Wiki 候选抽取的项目级 Prompt 覆盖；缺失或无效时使用代码内置默认值。`PromptService` 在服务生命周期内管理覆盖，保存以原子替换文件完成，新请求立即使用新内容；每个模型调用开始后使用固定的消息快照。用户编辑任务指令，服务端始终追加不可编辑的数据边界与证据约束。恢复默认会移除对应覆盖项。
+- `data/uploads/` 保存源文件，`data/artifacts/` 保存解析产物；均为运行时数据。图片按 manifest 中的文件名定位到当前知识产物的 `images/` 目录，兼容旧 manifest 中其他机器的 Windows/POSIX 路径，不读取旧绝对路径，无需重新入库。
+- `data/prompts.json` 保存问答与 Wiki 候选抽取的项目级 Prompt 覆盖；缺失或无效时使用代码内置默认值。Web 与独立 Worker 均注入 `PromptService`，每次读取任务指令时从共享的 `prompts.json` 加载覆盖，跨进程保存或恢复默认后无需重启；多机部署需挂载相同的配置文件目录。保存以原子替换文件完成，新请求立即使用新内容；每个模型调用开始后使用固定的消息快照。用户编辑任务指令，服务端始终追加不可编辑的数据边界与证据约束。恢复默认会移除对应覆盖项。
 - 无 API Key 时使用离线 Provider；配置 API Key 后使用 OpenAI-compatible 接口。默认真实模型示例采用阿里云百炼北京地域、`qwen-plus` 和 1024 维 `text-embedding-v4`。该模型同步接口单批最多 10 条，Provider 会将配置批大小自动收敛到模型上限，并显式传递 `dimensions`；错误响应保留服务端错误体但不记录请求头或密钥。
 - `WIKI_EXTRACTION_GRANULARITY` 控制 `focused / standard / exhaustive` 抽取密度，默认 `standard`；`WIKI_MAX_CANDIDATES` 限制单篇文档候选数，默认 12。
 - Embedding 模型或维度变化后，已有知识必须重新处理或新建知识库。

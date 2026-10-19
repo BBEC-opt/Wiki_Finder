@@ -13,6 +13,7 @@ from app.infrastructure.vector_index import create_vector_index
 from app.parsing import ParsingService
 from app.services.ingestion import IngestionWorker
 from app.services.outbox import OutboxDispatcher
+from app.services.prompts import PromptService
 
 
 async def run() -> None:
@@ -34,6 +35,7 @@ async def run() -> None:
     worker = IngestionWorker(
         repository, parser, embedding, queue, settings, storage=storage, chat_provider=chat,
     )
+    worker.wiki.prompts = PromptService(settings.database_path.parent / "prompts.json")
     worker.tracing = tracing
     outbox = OutboxDispatcher(repository, vector_index)
     await worker.start()

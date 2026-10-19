@@ -614,7 +614,7 @@ class Repository:
         db = await self.database.connect()
         try:
             await db.execute(
-                "UPDATE ingestion_tasks SET status='queued',started_at=NULL,updated_at=? WHERE status='running' AND started_at<?",
+                "UPDATE ingestion_tasks SET status='queued',started_at=NULL,updated_at=? WHERE status='running' AND updated_at<?",
                 (now_iso(), cutoff),
             )
             await db.commit()
@@ -628,13 +628,25 @@ class Repository:
         db = await self.database.connect()
         try:
             cursor = await db.execute(
-                "UPDATE ingestion_tasks SET status='running',attempts=attempts+1,started_at=?,updated_at=? WHERE id=? AND status='queued'",
-                (stamp, stamp, task_id),
+                "UPDATE ingestion_tasks SET status='running',attempts=attempts+1,started_at=?,updated_at=? WHERE id=? AND status='queued' AND available_at<=?",
+                (stamp, stamp, task_id, stamp),
             )
             await db.commit()
             if cursor.rowcount != 1:
                 return None
             return await self._one(db, "SELECT * FROM ingestion_tasks WHERE id=?", (task_id,))
+        finally:
+            await db.close()
+
+    async def renew_task_lease(self, task_id: str, attempt: int) -> bool:
+        db = await self.database.connect()
+        try:
+            cursor = await db.execute(
+                "UPDATE ingestion_tasks SET updated_at=? WHERE id=? AND status='running' AND attempts=?",
+                (now_iso(), task_id, attempt),
+            )
+            await db.commit()
+            return cursor.rowcount == 1
         finally:
             await db.close()
 

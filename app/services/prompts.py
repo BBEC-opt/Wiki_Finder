@@ -46,6 +46,7 @@ class PromptService:
 
     def list(self) -> list[dict]:
         with self._lock:
+            self._overrides = self._read()
             return [{"id": key, **PROMPT_INFO[key], "content": self._overrides.get(key, default),
                      "is_custom": key in self._overrides, "default": default}
                     for key, default in DEFAULT_PROMPTS.items()]
@@ -54,6 +55,7 @@ class PromptService:
         if prompt_id not in DEFAULT_PROMPTS:
             raise AppError("prompt_not_found", "Prompt 不存在", 404)
         with self._lock:
+            self._overrides = self._read()
             editable = self._overrides.get(prompt_id, DEFAULT_PROMPTS[prompt_id])
         return f"{editable}\n\n{MANDATORY_CONSTRAINTS[prompt_id]}"
 
@@ -64,6 +66,7 @@ class PromptService:
         if not content:
             raise AppError("empty_prompt", "Prompt 不能为空", 422)
         with self._lock:
+            self._overrides = self._read()
             updated = {**self._overrides, prompt_id: content}
             self._write(updated)
             self._overrides = updated
@@ -73,6 +76,7 @@ class PromptService:
         if prompt_id not in DEFAULT_PROMPTS:
             raise AppError("prompt_not_found", "Prompt 不存在", 404)
         with self._lock:
+            self._overrides = self._read()
             updated = {key: value for key, value in self._overrides.items() if key != prompt_id}
             self._write(updated)
             self._overrides = updated

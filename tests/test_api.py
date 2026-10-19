@@ -1,3 +1,4 @@
+import json
 import time
 from pathlib import Path
 
@@ -403,3 +404,43 @@ def test_mutating_missing_resources_return_not_found(client: TestClient):
     deleted = client.delete("/api/v1/knowledge/missing")
     assert deleted.status_code == 404
     assert deleted.json()["error"]["code"] == "knowledge_not_found"
+
+
+@pytest.mark.parametrize("stored_path", [
+    "/worker/data/artifacts/old/images/picture.png",
+    r"C:\worker\data\artifacts\old\images\picture.png",
+    "images/picture.png",
+])
+def test_artifact_image_uses_current_storage_directory(client: TestClient, stored_path: str):
+    kb = create_knowledge_base(client)
+    knowledge = client.post(
+        f"/api/v1/knowledge-bases/{kb['id']}/knowledge/manual",
+        json={"title": "图片资料", "content": "测试图片的来源资料。"},
+    ).json()["data"]
+    assert wait_for_completion(client, knowledge["id"])["parse_status"] == "completed"
+    directory = client.app.state.storage.artifact_dir(knowledge["id"])
+    (directory / "images").mkdir(exist_ok=True)
+    (directory / "images" / "picture.png").write_bytes(b"image-content")
+    (directory / "manifest.json").write_text(json.dumps({
+        "images": [{"id": "picture", "storage_path": stored_path}],
+    }), encoding="utf-8")
+    response = client.get(f"/api/v1/artifacts/{knowledge['id']}/images/by-id/picture")
+    assert response.status_code == 200
+    assert response.content == b"image-content"
+    assert client.get(f"/api/v1/artifacts/{knowledge['id']}/images/by-id/missing").status_code == 404
+
+
+def test_artifact_image_does_not_read_old_absolute_path(client: TestClient, tmp_path: Path):
+    kb = create_knowledge_base(client)
+    knowledge = client.post(
+        f"/api/v1/knowledge-bases/{kb['id']}/knowledge/manual",
+        json={"title": "隔离测试", "content": "仅允许读取当前资料的图片。"},
+    ).json()["data"]
+    assert wait_for_completion(client, knowledge["id"])["parse_status"] == "completed"
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"outside")
+    directory = client.app.state.storage.artifact_dir(knowledge["id"])
+    (directory / "manifest.json").write_text(json.dumps({
+        "images": [{"id": "outside", "storage_path": str(outside)}],
+    }), encoding="utf-8")
+    assert client.get(f"/api/v1/artifacts/{knowledge['id']}/images/by-id/outside").status_code == 404

@@ -68,7 +68,21 @@ async def test_replace_index_creates_idempotent_vector_outbox(tmp_path: Path):
         "title_tokens": "doc", "heading_tokens": "", "content_tokens": "内容",
     }])
     events = await repository.claim_outbox(10)
-    assert [event["event_type"] for event in events] == ["vector.delete_knowledge", "vector.upsert"]
+    assert [event["event_type"] for event in events] == ["vector.delete_knowledge"]
+    deletion = events[0]
+    assert await repository.claim_outbox(10) == []
+    await repository.fail_outbox(deletion["id"], "临时失败")
+    assert await repository.claim_outbox(10) == []
+    await repository.execute(
+        "UPDATE outbox_events SET available_at=created_at WHERE id=?", (deletion["id"],),
+    )
+    retry = await repository.claim_outbox(10)
+    assert [event["id"] for event in retry] == [deletion["id"]]
+    await repository.complete_outbox(deletion["id"])
+    writes = await repository.claim_outbox(10)
+    assert [event["event_type"] for event in writes] == ["vector.upsert"]
+    await repository.complete_outbox(writes[0]["id"])
+    assert await repository.claim_outbox(10) == []
 
 
 def test_qdrant_collection_is_dimension_isolated():

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 
@@ -74,3 +75,49 @@ def test_prompt_management_api_persists_resets_and_validates(tmp_path: Path):
         assert reset.json()["data"]["is_custom"] is False
         assert client.get("/api/v1/prompts").json()["data"][1]["content"] == DEFAULT_PROMPTS["wiki_candidates"]
 
+
+
+def test_prompt_instances_observe_external_updates_and_resets(tmp_path: Path):
+    path = tmp_path / "prompts.json"
+    web = PromptService(path)
+    worker = PromptService(path)
+    web.update("wiki_candidates", "只抽取设备相关概念")
+    assert worker.get("wiki_candidates").startswith("只抽取设备相关概念")
+    worker.update("rag_answer", "使用简短回答")
+    assert web.get("rag_answer").startswith("使用简短回答")
+    assert web.list()[1]["content"] == "只抽取设备相关概念"
+    web.reset("wiki_candidates")
+    assert worker.get("wiki_candidates").startswith(DEFAULT_PROMPTS["wiki_candidates"])
+    assert worker.get("rag_answer").startswith("使用简短回答")
+
+
+@pytest.mark.asyncio
+async def test_standalone_worker_loads_and_refreshes_prompts(tmp_path: Path, monkeypatch):
+    import app.worker as worker_module
+
+    settings = Settings(
+        _env_file=None, database_path=tmp_path / "demo.db",
+        upload_dir=tmp_path / "uploads", artifact_dir=tmp_path / "artifacts",
+        temp_dir=tmp_path / "tmp", embedding_dimension=64,
+    )
+    prompts = PromptService(tmp_path / "prompts.json")
+    prompts.update("wiki_candidates", "启动前规则")
+    started = asyncio.Event()
+    workers = []
+
+    async def capture_worker(worker):
+        workers.append(worker)
+        started.set()
+
+    monkeypatch.setattr(worker_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(worker_module.IngestionWorker, "start", capture_worker)
+    task = asyncio.create_task(worker_module.run())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        assert workers[0].wiki.prompts.get("wiki_candidates").startswith("启动前规则")
+        prompts.update("wiki_candidates", "启动后规则")
+        assert workers[0].wiki.prompts.get("wiki_candidates").startswith("启动后规则")
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task

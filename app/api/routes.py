@@ -311,7 +311,9 @@ async def get_artifact_by_id(knowledge_id: str, image_id: str, request: Request)
     image = next((x for x in manifest.get("images", []) if x.get("id") == image_id), None)
     if not image:
         raise AppError("artifact_not_found", "资源不存在", 404)
-    path = Path(image["storage_path"]).resolve()
+    # manifest 可能来自其他机器；图片始终从当前知识的 images 目录读取。
+    image_name = Path(image["storage_path"].replace("\\", "/")).name
+    path = (artifact_root / "images" / image_name).resolve()
     if artifact_root.resolve() not in path.parents or not path.is_file():
         raise AppError("artifact_not_found", "资源不存在", 404)
     return FileResponse(path)
