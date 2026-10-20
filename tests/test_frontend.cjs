@@ -37,6 +37,46 @@ function workspace() {
 }
 const page = id => ({id, title: id, page_type: 'topic', status: 'published', content: '', slug: id});
 
+test('等待中和处理中资料禁止重新处理', async () => {
+  const w = workspace();
+  for (const status of ['pending', 'processing']) {
+    w.evaluate(`state.documents=[{id:'a',parse_status:'${status}'}]; renderDocuments();`);
+    assert.match(w.get('#documentList').innerHTML, /data-retry="a"[^>]*disabled/);
+    await w.evaluate("reprocess('a')");
+  }
+  assert.equal(w.pending.length, 0);
+});
+
+test('重新处理锁跨列表重绘生效，失败后可再次提交', async () => {
+  const w = workspace();
+  w.evaluate("state.documents=[{id:'a',parse_status:'failed'}];");
+  const first = w.evaluate("reprocess('a')");
+  w.evaluate('renderDocuments()');
+  assert.match(w.get('#documentList').innerHTML, /data-retry="a"[^>]*disabled/);
+  await w.evaluate("reprocess('a')");
+  assert.equal(w.pending.length, 1);
+  w.pending[0].reject(new Error('提交失败')); await first;
+  assert.equal(w.get('#toast').textContent, '提交失败');
+  assert.doesNotMatch(w.get('#documentList').innerHTML, /data-retry="a"[^>]*disabled/);
+  const retry = w.evaluate("reprocess('a')");
+  assert.equal(w.pending.length, 2);
+  w.pending[1].reject(new Error('断网')); await retry;
+});
+
+test('重新处理成功但刷新失败时仍保留等待状态', async () => {
+  const w = workspace();
+  w.evaluate("state.documents=[{id:'a',parse_status:'completed'}];");
+  const submitting = w.evaluate("reprocess('a')");
+  w.pending[0].resolve({id: 'a', parse_status: 'pending'});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(w.pending.length, 2);
+  w.pending[1].reject(new Error('刷新失败')); await submitting;
+  assert.equal(w.evaluate('state.documents[0].parse_status'), 'pending');
+  assert.match(w.get('#documentList').innerHTML, /data-retry="a"[^>]*disabled/);
+  await w.evaluate("reprocess('a')");
+  assert.equal(w.pending.length, 2);
+});
+
 test('目录忽略乱序响应，后台刷新保留筛选与已有内容', async () => {
   const w = workspace();
   const older = w.evaluate("loadWikiPages('旧')");

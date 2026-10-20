@@ -5,6 +5,7 @@ const state = { bases: [], activeId: null, documents: [], wikiPages: [], wikiAll
 let promptItems = [], activePromptId = null;
 let wikiListRequest = 0, wikiProgressRequest = 0, wikiPageRequest = 0;
 let wikiListLoaded = false;
+const reprocessingIds = new Set();
 
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value = '') => String(value).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
@@ -167,7 +168,7 @@ function renderDocuments() {
     <article class="document-row" style="animation-delay:${index*40}ms">
       <span class="doc-icon">${doc.source_type==='file'?'▤':'¶'}</span><div><div class="doc-title" title="${escapeHtml(doc.title)}">${escapeHtml(doc.title)}</div>
       <div class="doc-meta"><button class="status-tag ${doc.parse_status}" data-stages="${doc.id}" title="查看处理阶段">${statusName(doc.parse_status)}</button> · ${doc.chunk_count} 个片段</div></div>
-      <div class="doc-actions"><button data-wiki="${doc.id}" title="查看关联 Wiki" ${doc.parse_status==='completed'?'':'disabled'}>关联页</button><button data-chunks="${doc.id}" title="查看分片" ${doc.parse_status==='completed'?'':'disabled'}>分片</button><button data-retry="${doc.id}" title="重新处理">↻</button><button data-delete="${doc.id}" title="删除">×</button></div>
+      <div class="doc-actions"><button data-wiki="${doc.id}" title="查看关联 Wiki" ${doc.parse_status==='completed'?'':'disabled'}>关联页</button><button data-chunks="${doc.id}" title="查看分片" ${doc.parse_status==='completed'?'':'disabled'}>分片</button><button data-retry="${doc.id}" title="重新处理" ${reprocessingIds.has(doc.id)||['pending','processing'].includes(doc.parse_status)?'disabled':''}>↻</button><button data-delete="${doc.id}" title="删除">×</button></div>
     </article>`).join('') : '<span class="empty-mark">⌁</span><p>这里还没有资料</p>';
   root.querySelectorAll('[data-delete]').forEach(el=>el.onclick=()=>removeDocument(el.dataset.delete));
   root.querySelectorAll('[data-retry]').forEach(el=>el.onclick=()=>reprocess(el.dataset.retry));
@@ -183,8 +184,18 @@ async function removeDocument(id) {
   catch(error){ toast(error.message,true); }
 }
 async function reprocess(id) {
-  try { await request(`/knowledge/${id}/reprocess`,{method:'POST'}); toast('已加入处理队列'); await loadDocuments(); }
+  const document=state.documents.find(doc=>doc.id===id);
+  if (!document || reprocessingIds.has(id) || ['pending','processing'].includes(document.parse_status)) return;
+  reprocessingIds.add(id);
+  renderDocuments();
+  try {
+    const updated=await request(`/knowledge/${id}/reprocess`,{method:'POST'});
+    state.documents=state.documents.map(doc=>doc.id===id?updated:doc);
+    toast('已加入处理队列');
+    await loadDocuments();
+  }
   catch(error){ toast(error.message,true); }
+  finally { reprocessingIds.delete(id); renderDocuments(); }
 }
 
 async function clearKnowledgeBase() {
