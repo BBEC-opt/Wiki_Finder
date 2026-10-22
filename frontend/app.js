@@ -26,7 +26,11 @@ async function withSubmitLock(form, action) {
 async function request(path, options = {}) {
   const response = await fetch(API + path, options);
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error?.message || payload.detail?.[0]?.msg || '请求失败');
+  if (!response.ok) {
+    const error=new Error(payload.error?.message || payload.detail?.[0]?.msg || '请求失败');
+    error.status=response.status;
+    throw error;
+  }
   return payload.data;
 }
 
@@ -748,20 +752,43 @@ function renderChatMessage(message) {
 
 async function showChatReference(ref) {
   const dialog=$('#viewerDialog'),body=$('#viewerBody');
-  $('#viewerTitle').textContent='['+ref.index+'] '+ref.knowledge_title;
+  $('#viewerEyebrow').textContent='回答引用 · 来源证据';
+  $('#viewerTitle').textContent='['+ref.index+'] '+(ref.knowledge_title||'未命名资料');
   body.replaceChildren();
-  const meta=document.createElement('p');meta.className='chunk-meta';meta.textContent=[ref.heading_path,ref.page_number?'第 '+ref.page_number+' 页':''].filter(Boolean).join(' · ');
-  const excerpt=document.createElement('pre');excerpt.className='chunk-content';excerpt.textContent=ref.content||'无片段快照';
-  const availability=document.createElement('p');availability.className='muted';availability.textContent='正在核对来源…';
-  body.append(meta,excerpt,availability);if(!dialog.open)dialog.showModal();
+  const meta=document.createElement('p');meta.className='chunk-meta';
+  meta.textContent=[ref.heading_path||'未记录章节',ref.page_number?'第 '+ref.page_number+' 页':'未记录页码'].join(' · ');
+  const label=document.createElement('h3');label.textContent='回答时的证据快照';
+  const excerpt=document.createElement('pre');excerpt.className='chunk-content';
+  excerpt.textContent=ref.evidence_content??ref.content??'无片段快照';
+  const availability=document.createElement('p');availability.className='muted';availability.setAttribute('role','status');
+  availability.textContent='正在核对来源…';
+  body.append(meta,label,excerpt,availability);if(!dialog.open)dialog.showModal();
+  body.scrollTop=0;
   const epoch=state.chatEpoch;
+  const isCurrent=()=>epoch===state.chatEpoch&&dialog.open&&body.contains(availability);
+  if(!ref.knowledge_id||!ref.chunk_id){availability.textContent='此历史引用缺少来源标识，仅展示已保存的快照。';return;}
   try {
     const chunks=await request('/knowledge/'+encodeURIComponent(ref.knowledge_id)+'/chunks');
-    if(epoch!==state.chatEpoch||!body.contains(availability))return;
-    const valid=chunks.some(chunk=>chunk.id===ref.chunk_id);
-    availability.textContent=valid?'以上为回答时的证据片段。':'来源已重新处理或该片段已移除；以上保留回答时的快照。';
-    if(valid&&ref.wiki_slug&&ref.knowledge_base_id===state.activeId){const button=document.createElement('button');button.className='button';button.textContent='阅读关联 Wiki';button.onclick=()=>{dialog.close();switchView('wiki');openWikiSlug(ref.wiki_slug);};body.append(button);}
-  }catch{availability.textContent='原始来源已删除或暂不可访问；以上保留回答时的快照。';}
+    if(!isCurrent())return;
+    const chunk=chunks.find(item=>item.id===ref.chunk_id);
+    availability.textContent=chunk?'已找到原始片段，可展开上下文核对。':'来源已重新处理或该片段已移除；以上保留回答时的快照。';
+    if(!chunk)return;
+    const details=document.createElement('details');details.className='reference-context';
+    const summary=document.createElement('summary');summary.textContent='查看原文上下文';
+    const location=document.createElement('p');location.className='chunk-meta';
+    location.textContent=['原文分片 '+(chunk.chunk_index+1),chunk.heading_path,chunk.page_number?'第 '+chunk.page_number+' 页':''].filter(Boolean).join(' · ');
+    const original=document.createElement('pre');original.className='chunk-content';
+    const text=chunk.parent_content||chunk.content,offset=text.indexOf(chunk.content);
+    if(chunk.content&&offset>=0){
+      const highlight=document.createElement('mark');highlight.textContent=chunk.content;
+      original.append(document.createTextNode(text.slice(0,offset)),highlight,document.createTextNode(text.slice(offset+chunk.content.length)));
+    }else original.textContent=text;
+    details.append(summary,location,original);body.append(details);
+    if(ref.wiki_slug&&ref.knowledge_base_id===state.activeId){const button=document.createElement('button');button.className='button';button.textContent='阅读关联 Wiki';button.onclick=()=>{dialog.close();switchView('wiki');openWikiSlug(ref.wiki_slug);};body.append(button);}
+  }catch(error){
+    if(!isCurrent())return;
+    availability.textContent=error.status===404?'原始来源已删除；以上保留回答时的快照。':'暂时无法核对来源，请稍后重新打开引用；以上保留回答时的快照。';
+  }
 }
 
 async function ask(question,retryId=null) {

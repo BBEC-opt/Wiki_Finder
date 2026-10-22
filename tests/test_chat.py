@@ -339,3 +339,44 @@ async def test_deleted_source_keeps_saved_reference_snapshot(service):
     # 检索桩中的来源不存在，历史仍保留回答时的证据，不依赖原始表的外键。
     assert await repo.get_knowledge(reference["knowledge_id"]) is None
     assert reference["content"] == "设备支持离线使用，最长工作八小时。"
+
+
+@pytest.mark.parametrize("budget", [300, 12000])
+async def test_reference_snapshot_matches_evidence_sent_to_model(service, budget):
+    from xml.etree import ElementTree
+
+    rag, repo, request = service
+    original = rag.retrieval.search
+    captured = []
+    parent = "前文<&>。设备支持离线使用，最长工作八小时。后文。" * 30
+
+    async def expanded_search(*args):
+        rows = await original(*args)
+        rows[0]["context_content"] = parent
+        rows[0]["heading_path"] = "指南 / 使用"
+        rows[0]["page_number"] = 3
+        return rows
+
+    class Model(ChatProvider):
+        async def stream(self, messages):
+            captured.extend(messages)
+            yield "最长工作八小时 [1]"
+
+    rag.retrieval.search = expanded_search
+    rag.chat = Model()
+    rag.max_context_chars = budget
+    events = await collect(rag, request)
+    event = next(event for event in events if event.startswith("event: references"))
+    streamed = json.loads(event.split("data: ", 1)[1])["references"]
+    saved = json.loads((await repo.chat_history(request.session_id))[-1]["references_json"])
+    assert streamed == saved
+    reference = saved[0]
+    xml = captured[-1]["content"].split("</references>")[0] + "</references>"
+    evidence = ElementTree.fromstring(xml).find("reference")
+    assert reference["evidence_content"] == evidence.text.strip()
+    assert parent.startswith(reference["evidence_content"])
+    assert reference["content"] == "设备支持离线使用，最长工作八小时。"
+    assert reference["heading_path"] == "指南 / 使用"
+    assert reference["page_number"] == 3
+    assert reference["index"] == 1
+    assert (len(reference["evidence_content"]) < len(parent)) == (budget == 300)

@@ -185,7 +185,9 @@ class RagService:
                         high = middle - 1
                 if not low:
                     break
-                block = self._reference_block(ref, content[:low])
+                # 保存实际送入模型的证据，避免父块扩展或预算裁剪后与引用展示不一致。
+                ref["evidence_content"] = content[:low]
+                block = self._reference_block(ref, ref["evidence_content"])
                 ref["wiki_slug"] = await self.repo.wiki_slug_for_chunk(item["knowledge_base_id"], item["chunk_id"])
                 context.append(block)
                 used += len(block)

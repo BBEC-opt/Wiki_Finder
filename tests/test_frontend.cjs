@@ -14,6 +14,9 @@ function workspace() {
     set innerHTML(value) { this.html = value; this.children = []; },
     setAttribute(name, value) { this.attributes[name] = value; },
     append(...children) { this.children.push(...children); },
+    replaceChildren(...children) { this.children = children; },
+    contains(child) { return this.children.includes(child); },
+    showModal() { this.open = true; }, close() { this.open = false; },
     querySelector() { return element(); }, querySelectorAll() { return []; },
     insertAdjacentHTML(_, value) { this.html += value; },
   });
@@ -22,11 +25,12 @@ function workspace() {
     return elements.get(selector);
   };
   const document = {hidden: false, querySelector: get, querySelectorAll: () => [],
-    createElement: element, addEventListener: (name, fn) => { listeners[name] = fn; }};
+    createElement: element, createTextNode: textContent => ({textContent}), addEventListener: (name, fn) => { listeners[name] = fn; }};
   const context = vm.createContext({document, window: {}, location: {search: ''}, URLSearchParams,
     setTimeout: () => 1, clearTimeout() {}, setInterval() {},
     fetch: url => new Promise((resolve, reject) => pending.push({url, reject,
-      resolve: data => resolve({ok: true, json: async () => ({data})})})),
+      resolve: data => resolve({ok: true, json: async () => ({data})}),
+      respond: (status, message) => resolve({ok: false, status, json: async () => ({error: {message}})})})),
   });
   const source = fs.readFileSync(path.join(__dirname, '../frontend/app.js'), 'utf8')
     .replace('switchView(initialView); checkHealth(); loadBases();', '');
@@ -155,4 +159,69 @@ test('旧内链导航不得覆盖之后点击的页面', async () => {
   w.pending[1].resolve([]); w.pending[2].resolve([]); await selected;
   w.pending[0].resolve(page('old')); await old;
   assert.equal(w.evaluate('state.activeWikiPage.id'), 'selected');
+});
+
+
+const reference = {index: 1, knowledge_id: 'doc', chunk_id: 'chunk', knowledge_base_id: 'kb',
+  knowledge_title: '设备指南', heading_path: '使用', page_number: 3, content: '命中片段',
+  evidence_content: '模型实际读取的上下文 <script>示例</script>'};
+const sourceChunk = {id: 'chunk', chunk_index: 2, content: '命中片段', parent_content: '前文命中片段后文', heading_path: '使用', page_number: 3};
+function openReference(w, ref=reference) {
+  return w.evaluate('showChatReference('+JSON.stringify(ref)+')');
+}
+
+test('引用显示实际证据快照，展开原文时高亮命中片段', async () => {
+  const w = workspace(), opening = openReference(w);
+  assert.equal(w.get('#viewerTitle').textContent, '[1] 设备指南');
+  assert.match(w.get('#viewerBody').children[0].textContent, /使用 · 第 3 页/);
+  assert.equal(w.get('#viewerBody').children[2].textContent, reference.evidence_content);
+  w.pending[0].resolve([sourceChunk]); await opening;
+  const details = w.get('#viewerBody').children[4];
+  assert.equal(details.children[0].textContent, '查看原文上下文');
+  assert.match(details.children[1].textContent, /原文分片 3/);
+  assert.deepEqual(details.children[2].children.map(node => node.textContent), ['前文', '命中片段', '后文']);
+});
+
+test('旧引用回退子块快照，重处理后不展示当前无关来源', async () => {
+  const w = workspace(), opening = openReference(w, {...reference, evidence_content: undefined});
+  w.pending[0].resolve([{...sourceChunk, id: 'new-chunk'}]); await opening;
+  const body = w.get('#viewerBody');
+  assert.equal(body.children[2].textContent, reference.content);
+  assert.match(body.children[3].textContent, /重新处理/);
+  assert.equal(body.children.length, 4);
+});
+
+test('删除来源与网络失败分别提示，快照始终保留', async () => {
+  for (const status of [404, 503]) {
+    const w = workspace(), opening = openReference(w);
+    w.pending[0].respond(status, '请求失败'); await opening;
+    assert.match(w.get('#viewerBody').children[3].textContent, status === 404 ? /已删除/ : /暂时无法核对/);
+    assert.equal(w.get('#viewerBody').children[2].textContent, reference.evidence_content);
+  }
+});
+
+test('切换引用、会话或关闭弹窗后忽略旧来源响应', async () => {
+  for (const action of ['reference', 'session', 'close']) {
+    for (const failed of [false, true]) {
+      const w = workspace(), first = openReference(w);
+      const oldStatus = w.get('#viewerBody').children[3];
+      let second;
+      if (action === 'reference') second = openReference(w, {...reference, index: 2});
+      if (action === 'session') w.evaluate('state.chatEpoch++');
+      if (action === 'close') w.get('#viewerDialog').close();
+      if (failed) w.pending[0].reject(new Error('断网'));
+      else w.pending[0].resolve([sourceChunk]);
+      await first;
+      assert.equal(oldStatus.textContent, '正在核对来源…');
+      assert.equal(w.get('#viewerBody').children.length, 4);
+      if (second) { w.pending[1].resolve([sourceChunk]); await second; }
+    }
+  }
+});
+
+test('缺少来源标识的历史引用只显示快照', async () => {
+  const w = workspace();
+  await openReference(w, {...reference, chunk_id: undefined});
+  assert.equal(w.pending.length, 0);
+  assert.match(w.get('#viewerBody').children[3].textContent, /缺少来源标识/);
 });
